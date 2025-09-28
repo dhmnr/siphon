@@ -1,3 +1,4 @@
 BasedOnStyle: LLVM # Or your preferred base style (e.g., Google, Chromium, WebKit)
 IndentWidth: 4
 UseTab: Never # Ensures spaces are used instead of tabs
+ColumnLimit: 100

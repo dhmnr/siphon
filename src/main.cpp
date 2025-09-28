@@ -19,9 +19,20 @@ int main() {
         std::cout << "Failed to initialize process memory!" << std::endl;
     }
 
-    std::string pattern = "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88";
-    uintptr_t ptr = memory.FindPtrFromAOB(pattern);
+    std::string WorldChrMan = "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88";
+    std::vector<uintptr_t> HpOffsets = {0x10EF8, 0x0, 0x190, 0x0, 0x138};
+    uintptr_t ptr = memory.FindPtrFromAOB(WorldChrMan);
     std::cout << "Pointer found at: 0x" << std::hex << ptr << std::endl;
-    system("pause");
+
+    uintptr_t HpAddress = memory.ResolvePointerChain(ptr, HpOffsets);
+    std::cout << "Hp found at: 0x" << std::hex << HpAddress << std::endl;
+
+    int32_t Hp;
+    while (true) {
+        memory.ReadInt32(HpAddress, Hp);
+        std::cout << "Hp: " << std::dec << Hp << std::endl;
+        Sleep(1000);
+    }
+    // system("pause");
     return 0;
 }
