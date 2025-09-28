@@ -1,4 +1,5 @@
 #include "process_memory.h"
+#include "server.h"
 #include "utils.h"
 #include <iostream>
 #include <psapi.h>
@@ -27,12 +28,16 @@ int main() {
     uintptr_t HpAddress = memory.ResolvePointerChain(ptr, HpOffsets);
     std::cout << "Hp found at: 0x" << std::hex << HpAddress << std::endl;
 
-    int32_t Hp;
-    while (true) {
-        memory.ReadInt32(HpAddress, Hp);
-        std::cout << "Hp: " << std::dec << Hp << std::endl;
-        Sleep(1000);
-    }
+    std::cout << "Starting gRPC Variable Service Server..." << std::endl;
+    RunServer(&memory, HpAddress);
+    return 0;
+
+    // int32_t Hp;
+    // while (true) {
+    //     memory.ReadInt32(HpAddress, Hp);
+    //     std::cout << "Hp: " << std::dec << Hp << std::endl;
+    //     Sleep(1000);
+    // }
     // system("pause");
     return 0;
 }

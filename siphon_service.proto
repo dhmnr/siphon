@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package siphon_service;
+
+// Service definition for managing a single variable
+service SiphonService {
+  // Get the current value of the variable
+  rpc GetHp(GetSiphonRequest) returns (GetSiphonResponse);
+  
+  // Set the value of the variable
+  rpc SetHp(SetSiphonRequest) returns (SetSiphonResponse);
+}
+
+// Request message for getting variable
+message GetSiphonRequest {
+  // Empty - we only have one variable
+}
+
+// Response message for getting variable
+message GetSiphonResponse {
+  int32 value = 1;
+}
+
+// Request message for setting variable
+message SetSiphonRequest {
+  int32 value = 1;
+}
+
+// Response message for setting variable
+message SetSiphonResponse {
+  bool success = 1;
+  string message = 2;
+}
