@@ -1,4 +1,5 @@
 #include "process_memory.h"
+#include "process_attribute.h"
 #include "utils.h"
 #include <algorithm>
 #include <iostream>
@@ -9,8 +10,10 @@
 #include <vector>
 #include <windows.h>
 
-ProcessMemory::ProcessMemory(const std::string &procName)
-    : processId(0), processHandle(nullptr), baseAddress(0), moduleSize(0), processName(procName) {}
+ProcessMemory::ProcessMemory(const std::string &processName,
+                             const std::map<std::string, ProcessAttribute> &processAttributes)
+    : processId(0), processHandle(nullptr), baseAddress(0), moduleSize(0), processName(processName),
+      processAttributes(processAttributes) {}
 
 ProcessMemory::~ProcessMemory() {
     if (processHandle) {
@@ -271,4 +274,32 @@ uintptr_t ProcessMemory::ResolvePointerChain(uintptr_t baseAddress,
 
     std::cout << "Final address: 0x" << std::hex << finalAddress << std::endl;
     return finalAddress;
+}
+
+bool ProcessMemory::ExtractAttribute(std::string attributeName, int32_t &value) {
+    uintptr_t ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
+    std::cout << "Pointer found at: 0x" << std::hex << ptr << std::endl;
+
+    uintptr_t attributeAddress =
+        ResolvePointerChain(ptr, processAttributes[attributeName].AttributeOffsets);
+    std::cout << attributeName << " found at: 0x" << std::hex << attributeAddress << std::endl;
+
+    if (!ReadInt32(attributeAddress, value)) {
+        return false;
+    }
+    std::cout << attributeName << " value: " << std::dec << value << std::endl;
+
+    return true;
+}
+
+bool ProcessMemory::WriteAttribute(std::string attributeName, const int32_t &value) {
+    uintptr_t ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
+
+    std::cout << "Pointer found at: 0x" << std::hex << ptr << std::endl;
+
+    uintptr_t attributeAddress =
+        ResolvePointerChain(ptr, processAttributes[attributeName].AttributeOffsets);
+    std::cout << attributeName << " found at: 0x" << std::hex << attributeAddress << std::endl;
+
+    return WriteInt32(attributeAddress, value);
 }

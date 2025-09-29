@@ -18,35 +18,38 @@ class SiphonClient {
   public:
     SiphonClient(std::shared_ptr<Channel> channel) : stub_(SiphonService::NewStub(channel)) {}
 
-    int32_t GetHp() {
+    int32_t GetAttribute(const std::string &attributeName) {
         GetSiphonRequest request;
         GetSiphonResponse response;
         ClientContext context;
 
-        Status status = stub_->GetHp(&context, request, &response);
+        request.set_attributename(attributeName);
+
+        Status status = stub_->GetAttribute(&context, request, &response);
 
         if (status.ok()) {
             return response.value();
         } else {
-            std::cout << "GetHp RPC failed: " << status.error_message() << std::endl;
+            std::cout << "GetAttribute RPC failed: " << status.error_message() << std::endl;
             return -1; // Error indicator
         }
     }
 
-    bool SetHp(int32_t value) {
+    bool SetAttribute(const std::string &attributeName, int32_t value) {
         SetSiphonRequest request;
         SetSiphonResponse response;
         ClientContext context;
 
         request.set_value(value);
+        request.set_attributename(attributeName);
 
-        Status status = stub_->SetHp(&context, request, &response);
+        Status status = stub_->SetAttribute(&context, request, &response);
 
         if (status.ok()) {
             std::cout << "Server response: " << response.message() << std::endl;
             return response.success();
         } else {
-            std::cout << "SetHp RPC failed: " << status.error_message() << std::endl;
+            std::cout << "SetAttribute RPC failed: " << status.error_message() << std::endl;
             return false;
         }
     }
@@ -62,7 +65,7 @@ int main() {
     SiphonClient client(grpc::CreateChannel(server_address, grpc::InsecureChannelCredentials()));
 
     std::cout << "gRPC Siphon Client" << std::endl;
-    std::cout << "Commands: get, set <value>, quit" << std::endl;
+    std::cout << "Commands: get <attribute>, set <attribute> <value>, quit" << std::endl;
 
     std::string command;
     while (true) {
@@ -72,25 +75,34 @@ int main() {
         if (command == "quit" || command == "q") {
             break;
         } else if (command == "get") {
-            int32_t value = client.GetHp();
-            if (value != -1) {
-                std::cout << "Variable value: " << value << std::endl;
-            }
-        } else if (command == "set") {
-            int32_t value;
-            if (std::cin >> value) {
-                if (client.SetHp(value)) {
-                    std::cout << "Variable set to: " << value << std::endl;
-                } else {
-                    std::cout << "Failed to set variable" << std::endl;
+            std::string attributeName;
+            if (std::cin >> attributeName) {
+                int32_t value = client.GetAttribute(attributeName);
+                if (value != -1) {
+                    std::cout << attributeName << " value: " << value << std::endl;
                 }
             } else {
-                std::cout << "Invalid value. Please enter a number." << std::endl;
+                std::cout << "Invalid attribute name." << std::endl;
+                std::cin.clear();
+                std::cin.ignore(10000, '\n');
+            }
+        } else if (command == "set") {
+            std::string attributeName;
+            int32_t value;
+            if (std::cin >> attributeName >> value) {
+                if (client.SetAttribute(attributeName, value)) {
+                    std::cout << attributeName << " set to: " << value << std::endl;
+                } else {
+                    std::cout << "Failed to set " << attributeName << std::endl;
+                }
+            } else {
+                std::cout << "Invalid input. Use: set <attribute> <value>" << std::endl;
                 std::cin.clear();
                 std::cin.ignore(10000, '\n');
             }
         } else {
-            std::cout << "Unknown command. Use: get, set <value>, or quit" << std::endl;
+            std::cout << "Unknown command. Use: get <attribute>, set <attribute> <value>, or quit"
+                      << std::endl;
         }
     }
 

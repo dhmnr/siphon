@@ -1,3 +1,4 @@
+#include "process_attribute.h"
 #include "process_memory.h"
 #include "server.h"
 #include "utils.h"
@@ -7,29 +8,29 @@
 #include <windows.h>
 
 int main() {
+    std::string processName;
+    std::map<std::string, ProcessAttribute> processAttributes;
+
     if (!IsRunAsAdmin()) {
         std::cout << "ERROR: Must run as Administrator!" << std::endl;
         system("pause");
         return 1;
     }
+    // TODO: Get attribute file from command line
+    GetProcessInfoFromTOML("../attributes.toml", &processName, &processAttributes);
+    // PrintProcessAttributes(attributes);
+    PrintProcessAttributes(processAttributes);
+    std::cout << "Process name: " << processName << std::endl;
 
-    ProcessMemory memory("eldenring.exe");
+    ProcessMemory memory(processName, processAttributes);
     if (memory.Initialize()) {
         std::cout << "Process memory initialized successfully!" << std::endl;
     } else {
         std::cout << "Failed to initialize process memory!" << std::endl;
     }
 
-    std::string WorldChrMan = "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88";
-    std::vector<uintptr_t> HpOffsets = {0x10EF8, 0x0, 0x190, 0x0, 0x138};
-    uintptr_t ptr = memory.FindPtrFromAOB(WorldChrMan);
-    std::cout << "Pointer found at: 0x" << std::hex << ptr << std::endl;
-
-    uintptr_t HpAddress = memory.ResolvePointerChain(ptr, HpOffsets);
-    std::cout << "Hp found at: 0x" << std::hex << HpAddress << std::endl;
-
     std::cout << "Starting gRPC Variable Service Server..." << std::endl;
-    RunServer(&memory, HpAddress);
+    RunServer(&memory);
     return 0;
 
     // int32_t Hp;

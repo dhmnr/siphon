@@ -5,25 +5,28 @@ package siphon_service;
 // Service definition for managing a single variable
 service SiphonService {
   // Get the current value of the variable
-  rpc GetHp(GetSiphonRequest) returns (GetSiphonResponse);
+  rpc GetAttribute(GetSiphonRequest) returns (GetSiphonResponse);
   
   // Set the value of the variable
-  rpc SetHp(SetSiphonRequest) returns (SetSiphonResponse);
+  rpc SetAttribute(SetSiphonRequest) returns (SetSiphonResponse);
 }
 
 // Request message for getting variable
 message GetSiphonRequest {
   // Empty - we only have one variable
+  string attributeName = 1;
 }
 
 // Response message for getting variable
 message GetSiphonResponse {
   int32 value = 1;
+  string attributeName = 2;
 }
 
 // Request message for setting variable
 message SetSiphonRequest {
   int32 value = 1;
+  string attributeName = 2;
 }
 
 // Response message for setting variable

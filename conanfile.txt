@@ -1,6 +1,7 @@
 [requires]
 grpc/1.54.3
 protobuf/3.21.12
+tomlplusplus/3.4.0
 
 [generators]
 CMakeDeps
@@ -12,3 +13,4 @@ cmake_layout
 [options]
 grpc/*:shared=False
 protobuf/*:shared=False
+tomlplusplus/*:shared=False

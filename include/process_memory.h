@@ -1,5 +1,7 @@
 #pragma once
 
+#include "process_attribute.h"
+#include <map>
 #include <string>
 #include <vector>
 #include <windows.h>
@@ -11,9 +13,11 @@ class ProcessMemory {
     uintptr_t baseAddress;
     size_t moduleSize;
     std::string processName;
+    std::map<std::string, ProcessAttribute> processAttributes;
 
   public:
-    ProcessMemory(const std::string &procName);
+    ProcessMemory(const std::string &processName,
+                  const std::map<std::string, ProcessAttribute> &processAttributes);
     ~ProcessMemory();
 
     DWORD FindProcessByName(const std::string &processName);
@@ -28,4 +32,6 @@ class ProcessMemory {
     bool ReadInt32(uintptr_t address, int32_t &value);
     bool WriteInt32(uintptr_t address, const int32_t &value);
     uintptr_t ResolvePointerChain(uintptr_t baseAddress, const std::vector<uintptr_t> &offsets);
+    bool ExtractAttribute(std::string attributeName, int32_t &value);
+    bool WriteAttribute(std::string attributeName, const int32_t &value);
 };

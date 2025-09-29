@@ -21,68 +21,72 @@ using siphon_service::SiphonService;
 class SiphonServiceImpl final : public SiphonService::Service {
   private:
     ProcessMemory *memory_;
-    uintptr_t hp_address_;
     mutable std::mutex mutex_;
 
   public:
-    SiphonServiceImpl(ProcessMemory *memory, uintptr_t hp_address)
-        : memory_(memory), hp_address_(hp_address) {}
+    SiphonServiceImpl(ProcessMemory *memory) : memory_(memory) {}
 
-    Status GetHp(ServerContext *context, const GetSiphonRequest *request,
-                 GetSiphonResponse *response) override {
+    Status GetAttribute(ServerContext *context, const GetSiphonRequest *request,
+                        GetSiphonResponse *response) override {
         std::lock_guard<std::mutex> lock(mutex_);
 
-        int32_t hp = 0;
+        int32_t attributeValue = 0;
 
-        if (memory_ && hp_address_ != 0) {
+        if (memory_ != 0) {
             // Read HP from game memory
-            bool success = memory_->ReadInt32(hp_address_, hp);
+            bool success = memory_->ExtractAttribute(request->attributename(), attributeValue);
             if (!success) {
-                std::cout << "Failed to read HP from memory" << std::endl;
-                hp = -1; // Error indicator
+                std::cout << "Failed to read " << request->attributename() << " from memory"
+                          << std::endl;
+                response->set_value(-1); // Error indicator
             }
         } else {
-            std::cout << "Memory not initialized or HP address not found" << std::endl;
-            hp = -1; // Error indicator
+            std::cout << "Memory not initialized or " << request->attributename()
+                      << " address not found" << std::endl;
+            response->set_value(-1); // Error indicator
         }
 
-        response->set_value(hp);
-        std::cout << "GetHp called - returning HP: " << hp << std::endl;
+        response->set_value(attributeValue);
+        std::cout << "GetAttribute called - returning " << request->attributename() << ": "
+                  << attributeValue << std::endl;
         return Status::OK;
     }
 
-    Status SetHp(ServerContext *context, const SetSiphonRequest *request,
-                 SetSiphonResponse *response) override {
+    Status SetAttribute(ServerContext *context, const SetSiphonRequest *request,
+                        SetSiphonResponse *response) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        int32_t hp = request->value();
+        const int32_t attributeValue = request->value();
 
-        if (memory_ && hp_address_ != 0) {
+        if (memory_ != 0) {
             // Write HP to game memory
-            bool success = memory_->WriteInt32(hp_address_, hp);
+            bool success = memory_->WriteAttribute(request->attributename(), attributeValue);
             if (!success) {
-                std::cout << "Failed to write HP to memory" << std::endl;
+                std::cout << "Failed to write " << request->attributename() << " to memory"
+                          << std::endl;
                 response->set_success(false);
-                response->set_message("Failed to write HP to memory");
+                response->set_message("Failed to write " + request->attributename() + " to memory");
                 return Status::OK;
             }
         } else {
-            std::cout << "Memory not initialized or HP address not found" << std::endl;
+            std::cout << "Memory not initialized or " << request->attributename()
+                      << " address not found" << std::endl;
             response->set_success(false);
-            response->set_message("Memory not initialized or HP address not found");
+            response->set_message("Memory not initialized or " + request->attributename() +
+                                  " address not found");
             return Status::OK;
         }
 
         response->set_success(true);
-        response->set_message("Hp set successfully");
+        response->set_message(request->attributename() + " set successfully");
 
-        std::cout << "SetHp called - new value: " << hp << std::endl;
+        std::cout << "SetAttribute called - new value: " << attributeValue << std::endl;
         return Status::OK;
     }
 };
 
-void RunServer(ProcessMemory *memory, uintptr_t hp_address) {
+void RunServer(ProcessMemory *memory) {
     std::string server_address("0.0.0.0:50051");
-    SiphonServiceImpl service(memory, hp_address);
+    SiphonServiceImpl service(memory);
 
     ServerBuilder builder;
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
