@@ -1,3 +1,4 @@
+rmdir /s /q build
 mkdir build && cd build
 conan install .. --build=missing -s build_type=Release
 

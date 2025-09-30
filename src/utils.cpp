@@ -1,5 +1,6 @@
 #include "process_attribute.h"
 #include <iostream>
+#include <spdlog/spdlog.h>
 #include <toml++/toml.h>
 #include <vector>
 #include <windows.h>
@@ -81,13 +82,13 @@ bool GetProcessInfoFromTOML(const std::string &filepath, std::string *processNam
 
 void PrintProcessAttributes(const std::map<std::string, ProcessAttribute> &attributes) {
     for (const auto &[name, attr] : attributes) {
-        std::cout << "Attribute Name: " << name << std::endl;
-        std::cout << "Attribute Pattern: " << attr.AttributePattern << std::endl;
-        std::cout << "Attribute Type: " << attr.AttributeType << std::endl;
-        std::cout << "Attribute Offsets: ";
+        spdlog::info("Attribute Name: {}", name);
+        spdlog::info("Attribute Pattern: {}", attr.AttributePattern);
+        spdlog::info("Attribute Type: {}", attr.AttributeType);
+        spdlog::info("Attribute Offsets: ");
         for (const auto &offset : attr.AttributeOffsets) {
-            std::cout << "0x" << std::hex << offset << " ";
+            spdlog::info("0x{:x}", offset);
         }
-        std::cout << std::dec << std::endl << std::endl;
+        spdlog::info("Attribute Offsets: ");
     }
 }

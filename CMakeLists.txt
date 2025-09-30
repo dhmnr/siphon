@@ -15,6 +15,7 @@ include(${CMAKE_BINARY_DIR}/generators/conan_toolchain.cmake)
 find_package(Protobuf REQUIRED)
 find_package(gRPC REQUIRED)
 find_package(tomlplusplus CONFIG REQUIRED)
+find_package(spdlog CONFIG REQUIRED)
 
 
 # Generate protobuf and gRPC files
@@ -62,6 +63,7 @@ include_directories(${GENERATED_PROTOBUF_PATH})
 include_directories(${Protobuf_INCLUDE_DIRS})
 include_directories(${gRPC_INCLUDE_DIRS})
 include_directories(${tomlplusplus_INCLUDE_DIRS})
+include_directories(${spdlog_INCLUDE_DIRS})
 
 # Server executable
 add_executable(siphon
@@ -85,8 +87,8 @@ target_link_libraries(siphon
     gRPC::grpc++ 
     protobuf::libprotobuf
     tomlplusplus::tomlplusplus
+    spdlog::spdlog
 )
-
 
 # Client executable
 add_executable(siphon_client

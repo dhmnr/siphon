@@ -1,44 +1,67 @@
 #include "process_attribute.h"
 #include "process_memory.h"
 #include "server.h"
+#include "spdlog/async.h"
+#include "spdlog/sinks/rotating_file_sink.h"
+#include "spdlog/spdlog.h"
 #include "utils.h"
 #include <iostream>
+#include <map>
 #include <psapi.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
 #include <tlhelp32.h>
 #include <windows.h>
 
+
+void InitLogger(bool use_stdout) {
+    std::shared_ptr<spdlog::logger> logger;
+
+    if (use_stdout) {
+        logger = spdlog::stdout_color_mt<spdlog::async_factory>("siphon");
+    } else {
+        logger =
+            spdlog::rotating_logger_mt<spdlog::async_factory>("siphon", "logs/server.log",
+                                                              1024 * 1024 * 10, // 10MB per file
+                                                              3                 // keep 3 files
+            );
+    }
+
+    spdlog::set_default_logger(logger);
+    spdlog::set_level(spdlog::level::debug);
+    spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [%t] %v");
+    spdlog::flush_every(std::chrono::seconds(3));
+    spdlog::flush_on(spdlog::level::warn);
+}
 int main() {
+    InitLogger(true);
+    spdlog::info("================================================");
+    spdlog::info("Starting Siphon Server");
+    spdlog::info("================================================");
     std::string processName;
     std::map<std::string, ProcessAttribute> processAttributes;
 
     if (!IsRunAsAdmin()) {
-        std::cout << "ERROR: Must run as Administrator!" << std::endl;
+        spdlog::error("ERROR: Must run as Administrator!");
         system("pause");
         return 1;
     }
     // TODO: Get attribute file from command line
-    GetProcessInfoFromTOML("../attributes.toml", &processName, &processAttributes);
+    GetProcessInfoFromTOML("attributes.toml", &processName, &processAttributes);
     // PrintProcessAttributes(attributes);
     PrintProcessAttributes(processAttributes);
-    std::cout << "Process name: " << processName << std::endl;
+    spdlog::info("Process name: {}", processName);
 
     ProcessMemory memory(processName, processAttributes);
     if (memory.Initialize()) {
-        std::cout << "Process memory initialized successfully!" << std::endl;
+        spdlog::info("Process memory initialized successfully!");
     } else {
-        std::cout << "Failed to initialize process memory!" << std::endl;
+        spdlog::error("Failed to initialize process memory!");
     }
 
-    std::cout << "Starting gRPC Variable Service Server..." << std::endl;
+    spdlog::info("Starting gRPC Variable Service Server...");
     RunServer(&memory);
-    return 0;
-
-    // int32_t Hp;
-    // while (true) {
-    //     memory.ReadInt32(HpAddress, Hp);
-    //     std::cout << "Hp: " << std::dec << Hp << std::endl;
-    //     Sleep(1000);
-    // }
-    // system("pause");
+    spdlog::info("================================================");
+    spdlog::info("Exiting Siphon Server");
+    spdlog::info("================================================");
     return 0;
 }

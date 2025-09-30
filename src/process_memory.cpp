@@ -5,6 +5,7 @@
 #include <iostream>
 #include <ostream>
 #include <psapi.h>
+#include <spdlog/spdlog.h>
 #include <sstream>
 #include <tlhelp32.h>
 #include <vector>
@@ -60,31 +61,32 @@ bool ProcessMemory::GetModuleInfo() {
 
 bool ProcessMemory::Initialize() {
     if (!IsRunAsAdmin()) {
-        std::cout << "ERROR: Must run as Administrator!" << std::endl;
+        spdlog::error("ERROR: Must run as Administrator!");
         return false;
     }
 
     processId = FindProcessByName(processName);
     if (processId == 0) {
-        std::cout << processName << " not found!" << std::endl;
+        spdlog::error("{} not found!", processName);
         return false;
     }
 
     processHandle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, processId);
     if (!processHandle) {
-        std::cout << "Failed to open process. Error: " << GetLastError() << std::endl;
+        spdlog::error("Failed to open process. Error: {}", GetLastError());
         return false;
     }
 
     if (!GetModuleInfo()) {
-        std::cout << "Failed to get module information!" << std::endl;
+        spdlog::error("Failed to get module information!");
         return false;
     }
 
-    std::cout << "Successfully attached to " << processName << " (PID: " << processId << ")"
-              << std::endl;
-    std::cout << "Base address: 0x" << std::hex << baseAddress << std::endl;
-    std::cout << "Module size: 0x" << std::hex << moduleSize << std::endl;
+    spdlog::info("Successfully attached to {} (PID: {})", processName, processId);
+    spdlog::info("Base address: 0x{:x}", baseAddress);
+    spdlog::info("Module size: 0x{:x}", moduleSize);
+    spdlog::info("Base address: 0x{:x}", baseAddress);
+    spdlog::info("Module size: 0x{:x}", moduleSize);
 
     return true;
 }
@@ -101,7 +103,7 @@ std::vector<uint8_t> ProcessMemory::ParseAOB(const std::string &pattern) {
             try {
                 bytes.push_back(static_cast<uint8_t>(std::stoul(token, nullptr, 16)));
             } catch (...) {
-                std::cout << "Invalid hex token: " << token << std::endl;
+                spdlog::error("Invalid hex token: {}", token);
                 return {};
             }
         }
@@ -124,12 +126,12 @@ uintptr_t ProcessMemory::AOBScan(const std::string &pattern, std::vector<bool> w
     std::vector<uint8_t> patternBytes = ParseAOB(pattern);
 
     if (patternBytes.empty()) {
-        std::cout << "Invalid pattern!" << std::endl;
+        spdlog::error("Invalid pattern!");
         return 0;
     }
 
-    std::cout << "Scanning for pattern: " << pattern << std::endl;
-    std::cout << "Pattern length: " << patternBytes.size() << " bytes" << std::endl;
+    spdlog::info("Scanning for pattern: {}", pattern);
+    spdlog::info("Pattern length: {} bytes", patternBytes.size());
 
     const size_t chunkSize = 0x10000; // 64KB chunks
     std::vector<uint8_t> buffer(chunkSize);
@@ -155,18 +157,18 @@ uintptr_t ProcessMemory::AOBScan(const std::string &pattern, std::vector<bool> w
 
             if (found) {
                 uintptr_t foundAddress = currentAddress + i;
-                std::cout << "Pattern found at: 0x" << std::hex << foundAddress << std::endl;
+                spdlog::info("Pattern found at: 0x{:x}", foundAddress);
                 return foundAddress;
             }
         }
 
         // Progress indicator
         if (offset % 0x100000 == 0) { // Every 1MB
-            std::cout << "Scanned: " << std::dec << (offset * 100) / moduleSize << "%" << std::endl;
+            spdlog::info("Scanned: {}%", (offset * 100) / moduleSize);
         }
     }
 
-    std::cout << "Pattern not found!" << std::endl;
+    spdlog::error("Pattern not found!");
     return 0;
 }
 
@@ -176,16 +178,15 @@ uintptr_t ProcessMemory::ExtractPtrFromInst(uintptr_t instructionAddress, int ad
 
     if (!ReadProcessMemory(processHandle, reinterpret_cast<LPCVOID>(instructionAddress),
                            instruction, sizeof(instruction), &bytesRead)) {
-        std::cout << "Failed to read instruction at 0x" << std::hex << instructionAddress
-                  << std::endl;
+        spdlog::error("Failed to read instruction at 0x{:x}", instructionAddress);
         return 0;
     }
 
     int32_t offset = *reinterpret_cast<int32_t *>(&instruction[addressStartIndex]);
     uintptr_t targetAddress = instructionAddress + 7 + offset; // 7 = instruction length
 
-    std::cout << "Found mov instruction with RIP-relative addressing" << std::endl;
-    std::cout << "Target address: 0x" << std::hex << targetAddress << std::endl;
+    spdlog::info("Found mov instruction with RIP-relative addressing");
+    spdlog::info("Target address: 0x{:x}", targetAddress);
 
     return targetAddress;
     // TODO : Error handling
@@ -210,11 +211,11 @@ uintptr_t ProcessMemory::FindPtrFromAOB(const std::string &pattern) {
     SIZE_T bytesRead;
     if (!ReadProcessMemory(processHandle, reinterpret_cast<LPCVOID>(pointerAddress), &ptrAddress,
                            sizeof(ptrAddress), &bytesRead)) {
-        std::cout << "Failed to read pointer at 0x" << std::hex << pointerAddress << std::endl;
+        spdlog::error("Failed to read pointer at 0x{:x}", pointerAddress);
         return 0;
     }
 
-    std::cout << "Pointer found at: 0x" << std::hex << ptrAddress << std::endl;
+    spdlog::info("Pointer found at: 0x{:x}", ptrAddress);
     return ptrAddress;
 }
 
@@ -243,51 +244,50 @@ uintptr_t ProcessMemory::ResolvePointerChain(uintptr_t baseAddress,
                                              const std::vector<uintptr_t> &offsets) {
     uintptr_t currentAddress = baseAddress;
     // TODO : Error handling
-    std::cout << "Starting pointer chain resolution:" << std::endl;
-    std::cout << "Base: 0x" << std::hex << currentAddress << std::endl;
+    spdlog::info("Starting pointer chain resolution:");
+    spdlog::info("Base: 0x{:x}", currentAddress);
 
     for (size_t i = 0; i < offsets.size() - 1; ++i) {
         if (currentAddress == 0) {
-            std::cout << "Null pointer encountered at level " << i << std::endl;
+            spdlog::error("Null pointer encountered at level {}", i);
             return 0;
         }
 
         // First add the offset to current address
         uintptr_t addressToRead = currentAddress + offsets[i];
-        std::cout << "0x" << std::hex << currentAddress << " + 0x" << offsets[i] << " = 0x"
-                  << addressToRead;
+        spdlog::info("0x{:x} + 0x{:x} = 0x{:x}", currentAddress, offsets[i], addressToRead);
 
         // Then read the pointer at that address
         uintptr_t nextAddress;
         if (!ReadPtr(addressToRead, nextAddress)) {
-            std::cout << " -> Failed to read pointer" << std::endl;
+            spdlog::error(" -> Failed to read pointer");
             return 0;
         }
 
-        std::cout << " -> 0x" << std::hex << nextAddress << std::endl;
+        spdlog::info(" -> 0x{:x}", nextAddress);
         currentAddress = nextAddress;
     }
 
     uintptr_t finalAddress = currentAddress + offsets[offsets.size() - 1];
-    std::cout << "0x" << std::hex << currentAddress << " + 0x" << offsets[offsets.size() - 1]
-              << " = 0x" << finalAddress;
+    spdlog::info("0x{:x} + 0x{:x} = 0x{:x}", currentAddress, offsets[offsets.size() - 1],
+                 finalAddress);
 
-    std::cout << "Final address: 0x" << std::hex << finalAddress << std::endl;
+    spdlog::info("Final address: 0x{:x}", finalAddress);
     return finalAddress;
 }
 
 bool ProcessMemory::ExtractAttribute(std::string attributeName, int32_t &value) {
     uintptr_t ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
-    std::cout << "Pointer found at: 0x" << std::hex << ptr << std::endl;
+    spdlog::info("Pointer found at: 0x{:x}", ptr);
 
     uintptr_t attributeAddress =
         ResolvePointerChain(ptr, processAttributes[attributeName].AttributeOffsets);
-    std::cout << attributeName << " found at: 0x" << std::hex << attributeAddress << std::endl;
+    spdlog::info("{} found at: 0x{:x}", attributeName, attributeAddress);
 
     if (!ReadInt32(attributeAddress, value)) {
         return false;
     }
-    std::cout << attributeName << " value: " << std::dec << value << std::endl;
+    spdlog::info("{} value: {}", attributeName, value);
 
     return true;
 }
@@ -295,11 +295,11 @@ bool ProcessMemory::ExtractAttribute(std::string attributeName, int32_t &value) 
 bool ProcessMemory::WriteAttribute(std::string attributeName, const int32_t &value) {
     uintptr_t ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
 
-    std::cout << "Pointer found at: 0x" << std::hex << ptr << std::endl;
+    spdlog::info("Pointer found at: 0x{:x}", ptr);
 
     uintptr_t attributeAddress =
         ResolvePointerChain(ptr, processAttributes[attributeName].AttributeOffsets);
-    std::cout << attributeName << " found at: 0x" << std::hex << attributeAddress << std::endl;
+    spdlog::info("{} found at: 0x{:x}", attributeName, attributeAddress);
 
     return WriteInt32(attributeAddress, value);
 }

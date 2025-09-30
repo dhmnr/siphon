@@ -7,6 +7,7 @@
 #include "process_memory.h"
 #include "siphon_service.grpc.pb.h"
 #include <grpcpp/grpcpp.h>
+#include <spdlog/spdlog.h>
 
 using grpc::Server;
 using grpc::ServerBuilder;
@@ -36,19 +37,18 @@ class SiphonServiceImpl final : public SiphonService::Service {
             // Read HP from game memory
             bool success = memory_->ExtractAttribute(request->attributename(), attributeValue);
             if (!success) {
-                std::cout << "Failed to read " << request->attributename() << " from memory"
-                          << std::endl;
+                spdlog::error("Failed to read {} from memory", request->attributename());
                 response->set_value(-1); // Error indicator
             }
         } else {
-            std::cout << "Memory not initialized or " << request->attributename()
-                      << " address not found" << std::endl;
+            spdlog::error("Memory not initialized or {} address not found",
+                          request->attributename());
             response->set_value(-1); // Error indicator
         }
 
         response->set_value(attributeValue);
-        std::cout << "GetAttribute called - returning " << request->attributename() << ": "
-                  << attributeValue << std::endl;
+        spdlog::info("GetAttribute called - returning {} : {}", request->attributename(),
+                     attributeValue);
         return Status::OK;
     }
 
@@ -61,15 +61,14 @@ class SiphonServiceImpl final : public SiphonService::Service {
             // Write HP to game memory
             bool success = memory_->WriteAttribute(request->attributename(), attributeValue);
             if (!success) {
-                std::cout << "Failed to write " << request->attributename() << " to memory"
-                          << std::endl;
+                spdlog::error("Failed to write {} to memory", request->attributename());
                 response->set_success(false);
                 response->set_message("Failed to write " + request->attributename() + " to memory");
                 return Status::OK;
             }
         } else {
-            std::cout << "Memory not initialized or " << request->attributename()
-                      << " address not found" << std::endl;
+            spdlog::error("Memory not initialized or {} address not found",
+                          request->attributename());
             response->set_success(false);
             response->set_message("Memory not initialized or " + request->attributename() +
                                   " address not found");
@@ -79,7 +78,7 @@ class SiphonServiceImpl final : public SiphonService::Service {
         response->set_success(true);
         response->set_message(request->attributename() + " set successfully");
 
-        std::cout << "SetAttribute called - new value: " << attributeValue << std::endl;
+        spdlog::info("SetAttribute called - new value: {}", attributeValue);
         return Status::OK;
     }
 };
@@ -93,13 +92,13 @@ void RunServer(ProcessMemory *memory) {
     builder.RegisterService(&service);
 
     std::unique_ptr<Server> server(builder.BuildAndStart());
-    std::cout << "Server listening on " << server_address << std::endl;
+    spdlog::info("Server listening on {}", server_address);
 
     server->Wait();
 }
 
 // int main() {
-//     std::cout << "Starting gRPC Variable Service Server..." << std::endl;
+//     spdlog::info("Starting gRPC Variable Service Server...");
 //     RunServer();
 //     return 0;
 // }
