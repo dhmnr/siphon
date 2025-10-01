@@ -91,7 +91,7 @@ class SiphonServiceImpl final : public SiphonService::Service {
                     InputKeyResponse *response) override {
         // TODO: Add error handling
         if (input_ != 0) {
-            input_->TapKey(request->key());
+            input_->TapKey(request->key(), std::stoi(request->value()));
         } else {
             spdlog::error("Input not initialized");
             response->set_success(false);

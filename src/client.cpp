@@ -56,14 +56,14 @@ class SiphonClient {
         }
     }
 
-    bool InputKey(const std::string &key) {
+    bool InputKey(const std::string &key, const std::string &value) {
 
         InputKeyRequest request;
         InputKeyResponse response;
         ClientContext context;
 
         request.set_key(key);
-
+        request.set_value(value);
         Status status = stub_->InputKey(&context, request, &response);
 
         if (status.ok()) {
@@ -85,7 +85,7 @@ int main() {
     SiphonClient client(grpc::CreateChannel(server_address, grpc::InsecureChannelCredentials()));
 
     std::cout << "gRPC Siphon Client" << std::endl;
-    std::cout << "Commands: get <attribute>, set <attribute> <value>, input <key>, quit"
+    std::cout << "Commands: get <attribute>, set <attribute> <value>, input <key> <value>, quit"
               << std::endl;
 
     std::string command;
@@ -123,12 +123,13 @@ int main() {
             }
         } else if (command == "input") {
             std::string key;
-            if (std::cin >> key) {
-                if (client.InputKey(key)) {
+            std::string value;
+            if (std::cin >> key >> value) {
+                if (client.InputKey(key, value)) {
                     std::cout << "Key " << key << " inputted successfully" << std::endl;
                 }
             } else {
-                std::cout << "Invalid input. Use: input <key>" << std::endl;
+                std::cout << "Invalid input. Use: input <key> <value>" << std::endl;
                 std::cin.clear();
                 std::cin.ignore(10000, '\n');
             }

@@ -41,6 +41,7 @@ message SetSiphonResponse {
 // Request message for inputting a key
 message InputKeyRequest {
   string key = 1;
+  string value = 2;
 }
 
 // Response message for inputting a key
