@@ -9,6 +9,9 @@ service SiphonService {
   
   // Set the value of the variable
   rpc SetAttribute(SetSiphonRequest) returns (SetSiphonResponse);
+
+  // Input a key
+  rpc InputKey(InputKeyRequest) returns (InputKeyResponse);
 }
 
 // Request message for getting variable
@@ -31,6 +34,17 @@ message SetSiphonRequest {
 
 // Response message for setting variable
 message SetSiphonResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// Request message for inputting a key
+message InputKeyRequest {
+  string key = 1;
+}
+
+// Response message for inputting a key
+message InputKeyResponse {
   bool success = 1;
   string message = 2;
 }

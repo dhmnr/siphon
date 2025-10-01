@@ -30,6 +30,8 @@ protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS ${PROTO_FILES})
 set(GRPC_SRCS "${GENERATED_PROTOBUF_PATH}/siphon_service.grpc.pb.cc")
 set(GRPC_HDRS "${GENERATED_PROTOBUF_PATH}/siphon_service.grpc.pb.h")
 
+set(INTERCEPTION_SDK_PATH "${CMAKE_SOURCE_DIR}/external/interception")
+
 if(TARGET protobuf::protoc)
     get_target_property(PROTOC_LOCATION protobuf::protoc IMPORTED_LOCATION)
     message(STATUS "protoc location: ${PROTOC_LOCATION}")
@@ -64,12 +66,14 @@ include_directories(${Protobuf_INCLUDE_DIRS})
 include_directories(${gRPC_INCLUDE_DIRS})
 include_directories(${tomlplusplus_INCLUDE_DIRS})
 include_directories(${spdlog_INCLUDE_DIRS})
+include_directories(${INTERCEPTION_SDK_PATH}/include)
 
 # Server executable
 add_executable(siphon
     src/main.cpp 
     src/utils.cpp 
     src/process_memory.cpp
+    src/process_input.cpp
     src/server.cpp
     ${PROTO_SRCS}
     ${GRPC_SRCS}
@@ -90,6 +94,31 @@ target_link_libraries(siphon
     spdlog::spdlog
 )
 
+# Link Interception library
+# For x64 builds
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    target_link_libraries(siphon
+        ${INTERCEPTION_SDK_PATH}/library/x64/interception.lib
+    )
+    # Copy DLL to output directory
+    add_custom_command(TARGET siphon POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${INTERCEPTION_SDK_PATH}/library/x64/interception.dll"
+            $<TARGET_FILE_DIR:siphon>
+    )
+# For x86 builds
+else()
+    target_link_libraries(siphon
+        ${INTERCEPTION_SDK_PATH}/library/x86/interception.lib
+    )
+    add_custom_command(TARGET siphon POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${INTERCEPTION_SDK_PATH}/library/x86/interception.dll"
+            $<TARGET_FILE_DIR:siphon>
+    )
+endif()
+
+
 # Client executable
 add_executable(siphon_client
     src/client.cpp
@@ -101,4 +130,3 @@ target_link_libraries(siphon_client
     gRPC::grpc++
     protobuf::libprotobuf
 )
-

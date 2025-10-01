@@ -26,7 +26,8 @@ bool IsRunAsAdmin() {
 }
 
 bool GetProcessInfoFromTOML(const std::string &filepath, std::string *processName,
-                            std::map<std::string, ProcessAttribute> *processAttributes) {
+                            std::map<std::string, ProcessAttribute> *processAttributes,
+                            std::string *processWindowName) {
     if (!processName || !processAttributes) {
         return false;
     }
@@ -40,6 +41,9 @@ bool GetProcessInfoFromTOML(const std::string &filepath, std::string *processNam
         if (auto process_info = config["process_info"].as_table()) {
             if (auto name = (*process_info)["name"].value<std::string>()) {
                 *processName = *name;
+            }
+            if (auto window_name = (*process_info)["window_name"].value<std::string>()) {
+                *processWindowName = *window_name;
             }
         }
 

@@ -1,4 +1,5 @@
 #include "process_attribute.h"
+#include "process_input.h"
 #include "process_memory.h"
 #include "server.h"
 #include "spdlog/async.h"
@@ -38,6 +39,7 @@ int main() {
     spdlog::info("Starting Siphon Server");
     spdlog::info("================================================");
     std::string processName;
+    std::string processWindowName;
     std::map<std::string, ProcessAttribute> processAttributes;
 
     if (!IsRunAsAdmin()) {
@@ -46,12 +48,14 @@ int main() {
         return 1;
     }
     // TODO: Get attribute file from command line
-    GetProcessInfoFromTOML("attributes.toml", &processName, &processAttributes);
+    GetProcessInfoFromTOML("attributes.toml", &processName, &processAttributes, &processWindowName);
     // PrintProcessAttributes(attributes);
     PrintProcessAttributes(processAttributes);
+    spdlog::info("Process window name: {}", processWindowName);
     spdlog::info("Process name: {}", processName);
 
     ProcessMemory memory(processName, processAttributes);
+    ProcessInput input_(processWindowName);
     if (memory.Initialize()) {
         spdlog::info("Process memory initialized successfully!");
     } else {
@@ -59,7 +63,7 @@ int main() {
     }
 
     spdlog::info("Starting gRPC Variable Service Server...");
-    RunServer(&memory);
+    RunServer(&memory, &input_);
     spdlog::info("================================================");
     spdlog::info("Exiting Siphon Server");
     spdlog::info("================================================");

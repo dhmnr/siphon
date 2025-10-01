@@ -4,6 +4,7 @@
 #include <string>
 #include <thread>
 
+#include "process_input.h"
 #include "process_memory.h"
 #include "siphon_service.grpc.pb.h"
 #include <grpcpp/grpcpp.h>
@@ -15,6 +16,8 @@ using grpc::ServerContext;
 using grpc::Status;
 using siphon_service::GetSiphonRequest;
 using siphon_service::GetSiphonResponse;
+using siphon_service::InputKeyRequest;
+using siphon_service::InputKeyResponse;
 using siphon_service::SetSiphonRequest;
 using siphon_service::SetSiphonResponse;
 using siphon_service::SiphonService;
@@ -22,10 +25,12 @@ using siphon_service::SiphonService;
 class SiphonServiceImpl final : public SiphonService::Service {
   private:
     ProcessMemory *memory_;
+    ProcessInput *input_;
     mutable std::mutex mutex_;
 
   public:
-    SiphonServiceImpl(ProcessMemory *memory) : memory_(memory) {}
+    SiphonServiceImpl(ProcessMemory *memory, ProcessInput *input)
+        : memory_(memory), input_(input) {}
 
     Status GetAttribute(ServerContext *context, const GetSiphonRequest *request,
                         GetSiphonResponse *response) override {
@@ -81,11 +86,25 @@ class SiphonServiceImpl final : public SiphonService::Service {
         spdlog::info("SetAttribute called - new value: {}", attributeValue);
         return Status::OK;
     }
+
+    Status InputKey(ServerContext *context, const InputKeyRequest *request,
+                    InputKeyResponse *response) override {
+        // TODO: Add error handling
+        if (input_ != 0) {
+            input_->TapKey(request->key());
+        } else {
+            spdlog::error("Input not initialized");
+            response->set_success(false);
+            response->set_message("Input not initialized");
+            return Status::OK;
+        }
+        return Status::OK;
+    }
 };
 
-void RunServer(ProcessMemory *memory) {
+void RunServer(ProcessMemory *memory, ProcessInput *input) {
     std::string server_address("0.0.0.0:50051");
-    SiphonServiceImpl service(memory);
+    SiphonServiceImpl service(memory, input);
 
     ServerBuilder builder;
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());

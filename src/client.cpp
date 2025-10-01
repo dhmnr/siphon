@@ -10,6 +10,8 @@ using grpc::ClientContext;
 using grpc::Status;
 using siphon_service::GetSiphonRequest;
 using siphon_service::GetSiphonResponse;
+using siphon_service::InputKeyRequest;
+using siphon_service::InputKeyResponse;
 using siphon_service::SetSiphonRequest;
 using siphon_service::SetSiphonResponse;
 using siphon_service::SiphonService;
@@ -54,6 +56,24 @@ class SiphonClient {
         }
     }
 
+    bool InputKey(const std::string &key) {
+
+        InputKeyRequest request;
+        InputKeyResponse response;
+        ClientContext context;
+
+        request.set_key(key);
+
+        Status status = stub_->InputKey(&context, request, &response);
+
+        if (status.ok()) {
+            return response.success();
+        } else {
+            std::cout << "InputKey RPC failed: " << status.error_message() << std::endl;
+            return false;
+        }
+    }
+
   private:
     std::unique_ptr<SiphonService::Stub> stub_;
 };
@@ -65,7 +85,8 @@ int main() {
     SiphonClient client(grpc::CreateChannel(server_address, grpc::InsecureChannelCredentials()));
 
     std::cout << "gRPC Siphon Client" << std::endl;
-    std::cout << "Commands: get <attribute>, set <attribute> <value>, quit" << std::endl;
+    std::cout << "Commands: get <attribute>, set <attribute> <value>, input <key>, quit"
+              << std::endl;
 
     std::string command;
     while (true) {
@@ -100,7 +121,20 @@ int main() {
                 std::cin.clear();
                 std::cin.ignore(10000, '\n');
             }
-        } else {
+        } else if (command == "input") {
+            std::string key;
+            if (std::cin >> key) {
+                if (client.InputKey(key)) {
+                    std::cout << "Key " << key << " inputted successfully" << std::endl;
+                }
+            } else {
+                std::cout << "Invalid input. Use: input <key>" << std::endl;
+                std::cin.clear();
+                std::cin.ignore(10000, '\n');
+            }
+        }
+
+        else {
             std::cout << "Unknown command. Use: get <attribute>, set <attribute> <value>, or quit"
                       << std::endl;
         }

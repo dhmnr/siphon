@@ -1,5 +1,6 @@
 [process_info]
 name = "eldenring.exe"
+window_name = "ELDEN RING"
 
 [attributes.PlayerHP]
 pattern = "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88"

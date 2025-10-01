@@ -6,5 +6,6 @@
 
 bool IsRunAsAdmin();
 bool GetProcessInfoFromTOML(const std::string &filepath, std::string *processName,
-                            std::map<std::string, ProcessAttribute> *attributes);
+                            std::map<std::string, ProcessAttribute> *attributes,
+                            std::string *processWindowName);
 void PrintProcessAttributes(const std::map<std::string, ProcessAttribute> &attributes);
