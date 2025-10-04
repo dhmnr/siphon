@@ -12,6 +12,13 @@ target_link_libraries(siphon psapi user32)
 add_executable(list_windows list_windows.cpp)
 target_link_libraries(list_windows psapi user32)
 
+add_executable(capture_window capture_window.cpp)
+
+target_link_libraries(capture_window 
+    windowsapp
+    d3d11
+    dxgi
+)
 set(INTERCEPTION_SDK_PATH "${CMAKE_SOURCE_DIR}/external/interception")
 
 # Add Interception include directory

@@ -1,6 +1,9 @@
+#include <cstdio>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <vector>
+#include <windows.h>
 
 #include "siphon_service.grpc.pb.h"
 #include <grpcpp/grpcpp.h>
@@ -8,6 +11,8 @@
 using grpc::Channel;
 using grpc::ClientContext;
 using grpc::Status;
+using siphon_service::CaptureFrameRequest;
+using siphon_service::CaptureFrameResponse;
 using siphon_service::GetSiphonRequest;
 using siphon_service::GetSiphonResponse;
 using siphon_service::InputKeyRequest;
@@ -74,10 +79,74 @@ class SiphonClient {
         }
     }
 
+    struct FrameData {
+        std::vector<unsigned char> pixels;
+        int32_t width;
+        int32_t height;
+        bool success;
+    };
+
+    FrameData CaptureFrame() {
+        CaptureFrameRequest request;
+        CaptureFrameResponse response;
+        ClientContext context;
+
+        Status status = stub_->CaptureFrame(&context, request, &response);
+
+        FrameData result;
+        if (status.ok() && response.success()) {
+            result.width = response.width();
+            result.height = response.height();
+            result.success = true;
+
+            // Convert the bytes to vector<unsigned char>
+            result.pixels =
+                std::vector<unsigned char>(response.frame().begin(), response.frame().end());
+        } else {
+            std::cout << "CaptureFrame RPC failed: " << status.error_message() << std::endl;
+            if (!response.message().empty()) {
+                std::cout << "Server message: " << response.message() << std::endl;
+            }
+            result.success = false;
+            result.pixels = std::vector<unsigned char>();
+        }
+        return result;
+    }
+
   private:
     std::unique_ptr<SiphonService::Stub> stub_;
 };
 
+bool SaveFrameToBMP(const std::vector<unsigned char> &pixels, int width, int height,
+                    const std::string &filename) {
+
+    if (pixels.empty())
+        return false;
+
+    BITMAPFILEHEADER fileHeader = {0};
+    fileHeader.bfType = 0x4D42; // "BM"
+    fileHeader.bfSize = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + pixels.size();
+    fileHeader.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+
+    BITMAPINFOHEADER infoHeader = {0};
+    infoHeader.biSize = sizeof(BITMAPINFOHEADER);
+    infoHeader.biWidth = width;
+    infoHeader.biHeight = -height;
+    infoHeader.biPlanes = 1;
+    infoHeader.biBitCount = 24;
+    infoHeader.biCompression = BI_RGB;
+
+    FILE *file = fopen(filename.c_str(), "wb");
+    if (!file)
+        return false;
+
+    fwrite(&fileHeader, sizeof(fileHeader), 1, file);
+    fwrite(&infoHeader, sizeof(infoHeader), 1, file);
+    fwrite(pixels.data(), pixels.size(), 1, file);
+    fclose(file);
+
+    return true;
+}
 int main() {
     std::string server_address("localhost:50051");
 
@@ -85,7 +154,8 @@ int main() {
     SiphonClient client(grpc::CreateChannel(server_address, grpc::InsecureChannelCredentials()));
 
     std::cout << "gRPC Siphon Client" << std::endl;
-    std::cout << "Commands: get <attribute>, set <attribute> <value>, input <key> <value>, quit"
+    std::cout << "Commands: get <attribute>, set <attribute> <value>, input <key> <value>, capture "
+                 "<filename>, quit"
               << std::endl;
 
     std::string command;
@@ -133,10 +203,31 @@ int main() {
                 std::cin.clear();
                 std::cin.ignore(10000, '\n');
             }
-        }
+        } else if (command == "capture") {
+            std::string filename;
+            if (std::cin >> filename) {
+                auto frameData = client.CaptureFrame();
 
-        else {
-            std::cout << "Unknown command. Use: get <attribute>, set <attribute> <value>, or quit"
+                if (frameData.success && !frameData.pixels.empty()) {
+                    std::cout << "Frame captured successfully - Size: " << frameData.width << "x"
+                              << frameData.height << std::endl;
+                    if (SaveFrameToBMP(frameData.pixels, frameData.width, frameData.height,
+                                       filename)) {
+                        std::cout << "Frame saved to: " << filename << std::endl;
+                    } else {
+                        std::cout << "Failed to save frame to: " << filename << std::endl;
+                    }
+                } else {
+                    std::cout << "Failed to capture frame" << std::endl;
+                }
+            } else {
+                std::cout << "Invalid input. Use: capture <filename>" << std::endl;
+                std::cin.clear();
+                std::cin.ignore(10000, '\n');
+            }
+        } else {
+            std::cout << "Unknown command. Use: get <attribute>, set <attribute> <value>, input "
+                         "<key> <value>, capture <filename>, or quit"
                       << std::endl;
         }
     }

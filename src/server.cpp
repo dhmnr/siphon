@@ -4,6 +4,7 @@
 #include <string>
 #include <thread>
 
+#include "process_capture.h"
 #include "process_input.h"
 #include "process_memory.h"
 #include "siphon_service.grpc.pb.h"
@@ -14,6 +15,8 @@ using grpc::Server;
 using grpc::ServerBuilder;
 using grpc::ServerContext;
 using grpc::Status;
+using siphon_service::CaptureFrameRequest;
+using siphon_service::CaptureFrameResponse;
 using siphon_service::GetSiphonRequest;
 using siphon_service::GetSiphonResponse;
 using siphon_service::InputKeyRequest;
@@ -26,11 +29,12 @@ class SiphonServiceImpl final : public SiphonService::Service {
   private:
     ProcessMemory *memory_;
     ProcessInput *input_;
+    HWND processWindow_;
     mutable std::mutex mutex_;
 
   public:
-    SiphonServiceImpl(ProcessMemory *memory, ProcessInput *input)
-        : memory_(memory), input_(input) {}
+    SiphonServiceImpl(ProcessMemory *memory, ProcessInput *input, HWND processWindow)
+        : memory_(memory), input_(input), processWindow_(processWindow) {}
 
     Status GetAttribute(ServerContext *context, const GetSiphonRequest *request,
                         GetSiphonResponse *response) override {
@@ -100,11 +104,33 @@ class SiphonServiceImpl final : public SiphonService::Service {
         }
         return Status::OK;
     }
+
+    Status CaptureFrame(ServerContext *context, const CaptureFrameRequest *request,
+                        CaptureFrameResponse *response) override {
+        // TODO: Add error handling
+        int width, height;
+        if (processWindow_ != 0) {
+            auto pixels = CaptureFrameInternal(processWindow_, width, height);
+            response->set_width(width);
+            response->set_height(height);
+            response->set_frame(reinterpret_cast<const char *>(pixels.data()), pixels.size());
+            SaveFrameToBMP(processWindow_, "frame.bmp");
+            spdlog::info("Frame captured successfully - width: {}, height: {}", width, height);
+            response->set_success(true);
+            response->set_message("Frame captured successfully");
+        } else {
+            spdlog::error("Process window not initialized");
+            response->set_success(false);
+            response->set_message("Process window not initialized");
+            return Status::OK;
+        }
+        return Status::OK;
+    }
 };
 
-void RunServer(ProcessMemory *memory, ProcessInput *input) {
+void RunServer(ProcessMemory *memory, ProcessInput *input, HWND processWindow) {
     std::string server_address("0.0.0.0:50051");
-    SiphonServiceImpl service(memory, input);
+    SiphonServiceImpl service(memory, input, processWindow);
 
     ServerBuilder builder;
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());

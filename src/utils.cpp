@@ -1,9 +1,13 @@
 #include "process_attribute.h"
+#include <cstdio>
+#include <cstring>
 #include <iostream>
 #include <spdlog/spdlog.h>
 #include <toml++/toml.h>
 #include <vector>
 #include <windows.h>
+
+#include "utils.h"
 
 bool IsRunAsAdmin() {
     BOOL isAdmin = FALSE;
@@ -95,4 +99,11 @@ void PrintProcessAttributes(const std::map<std::string, ProcessAttribute> &attri
         }
         spdlog::info("Attribute Offsets: ");
     }
+}
+
+bool GetProcessWindow(const std::string *processWindowName, HWND *gameWindow) {
+
+    EnumWindowsData data = {processWindowName, gameWindow};
+    EnumWindows(EnumWindowsProc, reinterpret_cast<LPARAM>(&data));
+    return *gameWindow != nullptr;
 }

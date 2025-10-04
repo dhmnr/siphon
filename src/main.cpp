@@ -10,9 +10,9 @@
 #include <map>
 #include <psapi.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
+#include <spdlog/spdlog.h>
 #include <tlhelp32.h>
 #include <windows.h>
-
 
 void InitLogger(bool use_stdout) {
     std::shared_ptr<spdlog::logger> logger;
@@ -41,6 +41,7 @@ int main() {
     std::string processName;
     std::string processWindowName;
     std::map<std::string, ProcessAttribute> processAttributes;
+    HWND processWindow;
 
     if (!IsRunAsAdmin()) {
         spdlog::error("ERROR: Must run as Administrator!");
@@ -54,8 +55,12 @@ int main() {
     spdlog::info("Process window name: {}", processWindowName);
     spdlog::info("Process name: {}", processName);
 
+    GetProcessWindow(&processWindowName, &processWindow);
+    SaveFrameToBMP(processWindow, "process_window.bmp");
+
     ProcessMemory memory(processName, processAttributes);
-    ProcessInput input_(processWindowName);
+    ProcessInput input_(processWindow);
+    ;
     if (memory.Initialize()) {
         spdlog::info("Process memory initialized successfully!");
     } else {
@@ -63,7 +68,7 @@ int main() {
     }
 
     spdlog::info("Starting gRPC Variable Service Server...");
-    RunServer(&memory, &input_);
+    // RunServer(&memory, &input_, processWindow);
     spdlog::info("================================================");
     spdlog::info("Exiting Siphon Server");
     spdlog::info("================================================");

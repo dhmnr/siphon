@@ -13,16 +13,15 @@ std::map<std::string, unsigned short> scancodeMap = {
     {"SPACE", 0x39}, {"F", 0x21}, {"E", 0x12}, {"ESC", 0x01},
 };
 
-ProcessInput::ProcessInput(const std::string &processWindowName)
-    : gameWindow(NULL), context(nullptr), keyboard(0), processWindowName(processWindowName) {
+ProcessInput::ProcessInput(HWND processWindow)
+    : processWindow(processWindow), context(nullptr), keyboard(0) {
     // Find process window
-    EnumWindowsData data = {&this->processWindowName, &gameWindow};
-    EnumWindows(EnumWindowsProc, reinterpret_cast<LPARAM>(&data));
 
-    if (!gameWindow) {
+    if (!processWindow) {
         spdlog::error("Process window not found! Make sure the it is running.");
     } else {
-        spdlog::info("Process window found! HWND: 0x{:X}", reinterpret_cast<uintptr_t>(gameWindow));
+        spdlog::info("Process window found! HWND: 0x{:X}",
+                     reinterpret_cast<uintptr_t>(processWindow));
     }
 
     // Initialize Interception
@@ -58,38 +57,38 @@ ProcessInput::~ProcessInput() {
 }
 
 bool ProcessInput::IsInitialized() const {
-    return gameWindow != nullptr && context != nullptr && keyboard != 0;
+    return processWindow != nullptr && context != nullptr && keyboard != 0;
 }
 
 // Ensure game window is in focus
 bool ProcessInput::BringToFocus() {
-    if (!gameWindow)
+    if (!processWindow)
         return false;
 
     // Check if already focused
-    if (GetForegroundWindow() == gameWindow) {
+    if (GetForegroundWindow() == processWindow) {
         return true;
     }
 
     // Method 1: Try simple approach first
-    ShowWindow(gameWindow, SW_RESTORE);
-    SetForegroundWindow(gameWindow);
+    ShowWindow(processWindow, SW_RESTORE);
+    SetForegroundWindow(processWindow);
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     // If that worked, we're done
-    if (GetForegroundWindow() == gameWindow) {
+    if (GetForegroundWindow() == processWindow) {
         return true;
     }
 
     // Method 2: Simulate Alt key press to allow focus change
     // This tricks Windows into thinking user is switching windows
     keybd_event(VK_MENU, 0, 0, 0); // Alt down
-    SetForegroundWindow(gameWindow);
+    SetForegroundWindow(processWindow);
     keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0); // Alt up
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    return GetForegroundWindow() == gameWindow;
+    return GetForegroundWindow() == processWindow;
 }
 
 void ProcessInput::PressKey(std::string key) {

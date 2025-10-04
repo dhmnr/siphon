@@ -12,6 +12,10 @@ service SiphonService {
 
   // Input a key
   rpc InputKey(InputKeyRequest) returns (InputKeyResponse);
+
+
+  // Capture a frame
+  rpc CaptureFrame(CaptureFrameRequest) returns (CaptureFrameResponse);
 }
 
 // Request message for getting variable
@@ -48,4 +52,18 @@ message InputKeyRequest {
 message InputKeyResponse {
   bool success = 1;
   string message = 2;
+}
+
+// Request message for capturing a frame
+message CaptureFrameRequest {
+  // Empty - we only have one frame
+}
+
+// Response message for capturing a frame
+message CaptureFrameResponse {
+  bytes frame = 1;
+  int32 width = 2;
+  int32 height = 3;
+  bool success = 4;
+  string message = 5;
 }
