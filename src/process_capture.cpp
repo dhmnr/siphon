@@ -1,495 +1,177 @@
-#include <spdlog/spdlog.h>
-#include <stdio.h>
-#include <string>
-#include <vector>
+#include <condition_variable>
+#include <d3d11.h>
+#include <dxgi1_2.h>
+#include <iostream>
+#include <mutex>
 #include <windows.h>
+#include <wrl/client.h>
+
+// Include WinRT headers AFTER windows.h
+#include <spdlog/spdlog.h>
+#include <windows.graphics.capture.interop.h>
+#include <windows.graphics.directx.direct3d11.interop.h>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Graphics.Capture.h>
+#include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
+#include <winrt/Windows.Graphics.DirectX.h>
+
+#pragma comment(lib, "windowsapp")
+#pragma comment(lib, "d3d11")
 
 #include "process_capture.h"
 
-// Test function to create a simple colored BMP for verification
-bool CreateTestBMP(const std::string &filename, int width, int height) {
-    spdlog::info("Creating test BMP: {}x{}", width, height);
+ProcessCapture::ProcessCapture() {}
 
-    // Create test pattern (red, green, blue stripes)
-    std::vector<unsigned char> testPixels(width * height * 3);
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            int pixelIndex = (y * width + x) * 3;
-            if (x < width / 3) {
-                // Red stripe
-                testPixels[pixelIndex] = 0;       // B
-                testPixels[pixelIndex + 1] = 0;   // G
-                testPixels[pixelIndex + 2] = 255; // R
-            } else if (x < 2 * width / 3) {
-                // Green stripe
-                testPixels[pixelIndex] = 0;       // B
-                testPixels[pixelIndex + 1] = 255; // G
-                testPixels[pixelIndex + 2] = 0;   // R
-            } else {
-                // Blue stripe
-                testPixels[pixelIndex] = 255;   // B
-                testPixels[pixelIndex + 1] = 0; // G
-                testPixels[pixelIndex + 2] = 0; // R
-            }
-        }
+ProcessCapture::~ProcessCapture() {}
+
+using Microsoft::WRL::ComPtr;
+namespace WGC = winrt::Windows::Graphics::Capture;
+namespace WF = winrt::Windows::Foundation;
+namespace DX = winrt::Windows::Graphics::DirectX;
+namespace D3D = winrt::Windows::Graphics::DirectX::Direct3D11;
+
+// Create D3D11 device
+ComPtr<ID3D11Device> ProcessCapture::CreateD3DDevice() {
+    ComPtr<ID3D11Device> device;
+    D3D_FEATURE_LEVEL featureLevels[] = {D3D_FEATURE_LEVEL_11_0};
+
+    HRESULT hr = D3D11CreateDevice(
+        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, featureLevels,
+        ARRAYSIZE(featureLevels), D3D11_SDK_VERSION, device.GetAddressOf(), nullptr, nullptr);
+
+    if (FAILED(hr)) {
+        std::cerr << "Failed to create D3D11 device" << std::endl;
     }
 
-    // Calculate BMP parameters
-    int bytesPerPixel = 3;
-    int rowSize = ((width * bytesPerPixel + 3) / 4) * 4;
-    int padding = rowSize - (width * bytesPerPixel);
-    int imageSize = rowSize * height;
+    return device;
+}
 
-    // Create headers
-    BITMAPFILEHEADER fileHeader;
-    memset(&fileHeader, 0, sizeof(fileHeader));
-    fileHeader.bfType = 0x4D42;
-    fileHeader.bfSize = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + imageSize;
-    fileHeader.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+// Create WinRT device from D3D11
+D3D::IDirect3DDevice ProcessCapture::CreateDirect3DDevice(ComPtr<ID3D11Device> d3dDevice) {
+    ComPtr<IDXGIDevice> dxgiDevice;
+    d3dDevice.As(&dxgiDevice);
 
-    BITMAPINFOHEADER infoHeader;
-    memset(&infoHeader, 0, sizeof(infoHeader));
-    infoHeader.biSize = sizeof(BITMAPINFOHEADER);
-    infoHeader.biWidth = width;
-    infoHeader.biHeight = -height;
-    infoHeader.biPlanes = 1;
-    infoHeader.biBitCount = 24;
-    infoHeader.biCompression = BI_RGB;
-    infoHeader.biSizeImage = imageSize;
+    winrt::com_ptr<::IInspectable> inspectable;
+    winrt::check_hresult(CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice.Get(), inspectable.put()));
 
-    // Write file
-    FILE *file = fopen(filename.c_str(), "wb");
-    if (!file)
-        return false;
+    return inspectable.as<D3D::IDirect3DDevice>();
+}
 
-    fwrite(&fileHeader, sizeof(fileHeader), 1, file);
-    fwrite(&infoHeader, sizeof(infoHeader), 1, file);
+// Get texture from surface
+ComPtr<ID3D11Texture2D> ProcessCapture::GetTextureFromSurface(D3D::IDirect3DSurface surface) {
+    auto access =
+        surface.as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
+    ComPtr<ID3D11Texture2D> texture;
+    winrt::check_hresult(
+        access->GetInterface(__uuidof(ID3D11Texture2D), (void **)texture.GetAddressOf()));
+    return texture;
+}
 
-    // Write test pixels
-    const unsigned char *pixelPtr = testPixels.data();
-    for (int y = 0; y < height; y++) {
-        fwrite(pixelPtr, width * bytesPerPixel, 1, file);
-        if (padding > 0) {
-            static const unsigned char paddingBytes[4] = {0, 0, 0, 0};
-            fwrite(paddingBytes, padding, 1, file);
+bool ProcessCapture::Initialize(HWND processWindow) {
+    this->processWindow = processWindow;
+    d3dDevice = CreateD3DDevice();
+    device = CreateDirect3DDevice(d3dDevice);
+
+    auto interop =
+        winrt::get_activation_factory<WGC::GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
+    winrt::check_hresult(interop->CreateForWindow(
+        processWindow, winrt::guid_of<WGC::GraphicsCaptureItem>(), winrt::put_abi(item)));
+
+    auto size = item.Size();
+    spdlog::info("Capture size: {}x{}", size.Width, size.Height);
+    this->processWindowWidth = size.Width;
+    this->processWindowHeight = size.Height;
+    framePool = WGC::Direct3D11CaptureFramePool::CreateFreeThreaded(
+        device, DX::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
+
+    this->session = framePool.CreateCaptureSession(item);
+
+    // Keep updating latest frame in background
+    this->framePool.FrameArrived([&](auto &&sender, auto &&) {
+        auto frame = sender.TryGetNextFrame();
+        if (frame) {
+            std::lock_guard<std::mutex> lock(frameMutex);
+            this->latestFrame = GetTextureFromSurface(frame.Surface());
         }
-        pixelPtr += width * bytesPerPixel;
-    }
+    });
 
-    fclose(file);
-    spdlog::info("Test BMP created: {}", filename);
+    session.StartCapture();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
     return true;
 }
 
-// Helper function to try different capture strategies
-bool TryCaptureStrategy(HWND hwnd, HDC hdcMem, int width, int height, const char *strategyName) {
-    spdlog::info("Trying capture strategy: {}", strategyName);
+// Call this from gRPC handler
+std::vector<uint8_t> ProcessCapture::GetPixelData() {
+    std::lock_guard<std::mutex> lock(frameMutex);
 
-    if (strcmp(strategyName, "PrintWindow") == 0) {
-        // Try different PrintWindow flags for background windows
-        if (PrintWindow(hwnd, hdcMem, PW_RENDERFULLCONTENT)) {
-            return true;
-        }
-        // Fallback to basic PrintWindow
-        if (PrintWindow(hwnd, hdcMem, 0)) {
-            return true;
-        }
-        // Try with client area only
-        return PrintWindow(hwnd, hdcMem, PW_CLIENTONLY);
-    } else if (strcmp(strategyName, "BitBlt") == 0) {
-        HDC hdcWindow = GetDC(hwnd);
-        if (!hdcWindow)
-            return false;
-        bool result = BitBlt(hdcMem, 0, 0, width, height, hdcWindow, 0, 0, SRCCOPY);
-        ReleaseDC(hwnd, hdcWindow);
-        return result;
-    } else if (strcmp(strategyName, "ScreenCapture") == 0) {
-        HDC hdcScreen = GetDC(NULL);
-        if (!hdcScreen)
-            return false;
-        POINT clientTopLeft = {0, 0};
-        ClientToScreen(hwnd, &clientTopLeft);
-        bool result = BitBlt(hdcMem, 0, 0, width, height, hdcScreen, clientTopLeft.x,
-                             clientTopLeft.y, SRCCOPY);
-        ReleaseDC(NULL, hdcScreen);
-        return result;
-    } else if (strcmp(strategyName, "FullScreenCapture") == 0) {
-        // Capture entire screen, then crop to window
-        HDC hdcScreen = GetDC(NULL);
-        if (!hdcScreen)
-            return false;
+    if (!this->latestFrame)
+        return {};
 
-        // Get screen dimensions
-        int screenWidth = GetSystemMetrics(SM_CXSCREEN);
-        int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+    // Copy texture to CPU readable format
+    D3D11_TEXTURE2D_DESC desc;
+    this->latestFrame->GetDesc(&desc);
 
-        // Create a larger bitmap to hold screen data
-        HBITMAP hbmScreen = CreateCompatibleBitmap(hdcScreen, screenWidth, screenHeight);
-        HDC hdcScreenMem = CreateCompatibleDC(hdcScreen);
-        HGDIOBJ oldScreenBitmap = SelectObject(hdcScreenMem, hbmScreen);
+    ComPtr<ID3D11Texture2D> staging;
+    D3D11_TEXTURE2D_DESC stagingDesc = desc;
+    stagingDesc.Usage = D3D11_USAGE_STAGING;
+    stagingDesc.BindFlags = 0;
+    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    stagingDesc.MiscFlags = 0;
 
-        // Capture entire screen
-        bool screenResult =
-            BitBlt(hdcScreenMem, 0, 0, screenWidth, screenHeight, hdcScreen, 0, 0, SRCCOPY);
+    this->d3dDevice->CreateTexture2D(&stagingDesc, nullptr, &staging);
 
-        if (screenResult) {
-            // Now copy the window area from screen capture to our target DC
-            POINT clientTopLeft = {0, 0};
-            ClientToScreen(hwnd, &clientTopLeft);
-            bool result = BitBlt(hdcMem, 0, 0, width, height, hdcScreenMem, clientTopLeft.x,
-                                 clientTopLeft.y, SRCCOPY);
+    ComPtr<ID3D11DeviceContext> context;
+    this->d3dDevice->GetImmediateContext(&context);
+    context->CopyResource(staging.Get(), this->latestFrame.Get());
 
-            SelectObject(hdcScreenMem, oldScreenBitmap);
-            DeleteObject(hbmScreen);
-            DeleteDC(hdcScreenMem);
-            ReleaseDC(NULL, hdcScreen);
-            return result;
-        }
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
 
-        SelectObject(hdcScreenMem, oldScreenBitmap);
-        DeleteObject(hbmScreen);
-        DeleteDC(hdcScreenMem);
-        ReleaseDC(NULL, hdcScreen);
-        return false;
+    // Copy to vector
+    std::vector<uint8_t> pixels(desc.Width * desc.Height * 4);
+    for (UINT y = 0; y < desc.Height; y++) {
+        memcpy(pixels.data() + y * desc.Width * 4, (uint8_t *)mapped.pData + y * mapped.RowPitch,
+               desc.Width * 4);
     }
-    return false;
+
+    context->Unmap(staging.Get(), 0);
+    return pixels;
 }
 
-// Capture window frame as RGB bytes
-std::vector<unsigned char> CaptureFrameInternal(HWND processWindow, int &width, int &height) {
-    if (!processWindow || !IsWindow(processWindow)) {
-        spdlog::error("Invalid window handle");
-        return {};
-    }
-
-    // Check if window is visible
-    if (!IsWindowVisible(processWindow)) {
-        spdlog::error("Window is not visible");
-        return {};
-    }
-
-    // Get window information for debugging
-    char windowTitle[256] = {0};
-    char className[256] = {0};
-    GetWindowTextA(processWindow, windowTitle, sizeof(windowTitle));
-    GetClassNameA(processWindow, className, sizeof(className));
-    spdlog::info("Capturing window - Title: '{}', Class: '{}', HWND: 0x{:p}", windowTitle,
-                 className, (void *)processWindow);
-
-    // Get window dimensions - try multiple approaches
-    RECT clientRect, windowRect;
-    if (!GetClientRect(processWindow, &clientRect)) {
-        spdlog::error("Failed to get client rect");
-        return {};
-    }
-
-    if (!GetWindowRect(processWindow, &windowRect)) {
-        spdlog::error("Failed to get window rect");
-        return {};
-    }
-
-    // Try to get the actual content area
-    int clientWidth = clientRect.right - clientRect.left;
-    int clientHeight = clientRect.bottom - clientRect.top;
-    int windowWidth = windowRect.right - windowRect.left;
-    int windowHeight = windowRect.bottom - windowRect.top;
-
-    spdlog::info("Window rect: {}x{}, Client rect: {}x{}", windowWidth, windowHeight, clientWidth,
-                 clientHeight);
-
-    // Use client area for capture
-    width = clientWidth;
-    height = clientHeight;
-
-    if (width <= 0 || height <= 0) {
-        spdlog::error("Invalid window dimensions: {}x{}", width, height);
-        return {};
-    }
-
-    spdlog::info("Capturing client area: {}x{}", width, height);
-
-    // Get device contexts
-    HDC hdcWindow = GetDC(processWindow);
-    if (!hdcWindow) {
-        spdlog::error("Failed to get window DC");
-        return {};
-    }
-
-    HDC hdcMem = CreateCompatibleDC(hdcWindow);
-    if (!hdcMem) {
-        spdlog::error("Failed to create compatible DC");
-        ReleaseDC(processWindow, hdcWindow);
-        return {};
-    }
-
-    HBITMAP hbmScreen = CreateCompatibleBitmap(hdcWindow, width, height);
-    if (!hbmScreen) {
-        spdlog::error("Failed to create compatible bitmap");
-        DeleteDC(hdcMem);
-        ReleaseDC(processWindow, hdcWindow);
-        return {};
-    }
-
-    HGDIOBJ oldBitmap = SelectObject(hdcMem, hbmScreen);
-
-    // Fill with black background first to avoid white background
-    RECT fillRect = {0, 0, width, height};
-    HBRUSH blackBrush = CreateSolidBrush(RGB(0, 0, 0));
-    FillRect(hdcMem, &fillRect, blackBrush);
-    DeleteObject(blackBrush);
-
-    // Check if window is minimized or in background
-    bool isMinimized = IsIconic(processWindow);
-    HWND foregroundWindow = GetForegroundWindow();
-    bool isInBackground = (foregroundWindow != processWindow);
-
-    spdlog::info("Window state - Minimized: {}, In background: {}", isMinimized, isInBackground);
-
-    // For background/minimized windows, we need special handling
-    HWND originalForeground = nullptr;
-    if (isMinimized || isInBackground) {
-        spdlog::info("Window is minimized or in background - using special capture method");
-
-        // Store original foreground window
-        originalForeground = GetForegroundWindow();
-
-        // Try to restore and bring window to foreground temporarily
-        if (isMinimized) {
-            ShowWindow(processWindow, SW_RESTORE);
-            Sleep(200); // Give it time to restore
-        }
-
-        // Bring to foreground
-        SetForegroundWindow(processWindow);
-        Sleep(200); // Give it time to render
-
-        spdlog::info("Temporarily brought window to foreground for capture");
-    }
-
-    // Try different capture strategies in order of preference
-    const char *strategies[] = {"PrintWindow", "BitBlt", "ScreenCapture", "FullScreenCapture"};
-    bool captureSuccess = false;
-
-    for (const char *strategy : strategies) {
-        if (TryCaptureStrategy(processWindow, hdcMem, width, height, strategy)) {
-            spdlog::info("Capture successful with strategy: {}", strategy);
-            captureSuccess = true;
-            break;
-        } else {
-            spdlog::warn("Strategy {} failed", strategy);
-        }
-    }
-
-    if (!captureSuccess) {
-        spdlog::error("All capture strategies failed");
-    }
-
-    // Restore original window state if we changed it
-    if (originalForeground && originalForeground != processWindow) {
-        spdlog::info("Restoring original foreground window");
-        SetForegroundWindow(originalForeground);
-    }
-
-    // Setup bitmap info for RGB format
-    BITMAPINFOHEADER bi = {0};
-    bi.biSize = sizeof(BITMAPINFOHEADER);
-    bi.biWidth = width;
-    bi.biHeight = -height; // Negative for top-down bitmap
-    bi.biPlanes = 1;
-    bi.biBitCount = 24; // 24-bit RGB
-    bi.biCompression = BI_RGB;
-
-    // Allocate buffer for pixel data (3 bytes per pixel: BGR)
-    std::vector<unsigned char> pixels(width * height * 3);
-
-    // Get bitmap bits
-    int lines =
-        GetDIBits(hdcMem, hbmScreen, 0, height, pixels.data(), (BITMAPINFO *)&bi, DIB_RGB_COLORS);
-    if (lines == 0) {
-        DWORD error = GetLastError();
-        spdlog::error("GetDIBits failed with error: {}", error);
-        pixels.clear();
-    } else {
-        spdlog::info("Successfully captured {} lines", lines);
-
-        // Check if we got actual content (not just white/black)
-        bool hasContent = false;
-        int nonWhitePixels = 0;
-        int nonBlackPixels = 0;
-
-        for (size_t i = 0; i < pixels.size(); i += 3) {
-            // Check if pixel is not pure white (255,255,255)
-            if (!(pixels[i] == 255 && pixels[i + 1] == 255 && pixels[i + 2] == 255)) {
-                nonWhitePixels++;
-            }
-            // Check if pixel is not pure black (0,0,0)
-            if (!(pixels[i] == 0 && pixels[i + 1] == 0 && pixels[i + 2] == 0)) {
-                nonBlackPixels++;
-            }
-        }
-
-        spdlog::info("Pixel analysis - Non-white: {}, Non-black: {}, Total pixels: {}",
-                     nonWhitePixels, nonBlackPixels, pixels.size() / 3);
-
-        if (nonWhitePixels < 100 && nonBlackPixels < 100) {
-            spdlog::warn("Captured image appears to be solid color - may indicate capture failure");
-        }
-    }
-
-    // Cleanup
-    SelectObject(hdcMem, oldBitmap);
-    DeleteObject(hbmScreen);
-    DeleteDC(hdcMem);
-    ReleaseDC(processWindow, hdcWindow);
-
-    return pixels; // Returns BGR format
-}
-
-// Optional: Save to BMP for debugging
-bool SaveFrameToBMP(HWND processWindow, const std::string &filename) {
-    int width, height;
-
-    auto pixels = CaptureFrameInternal(processWindow, width, height);
-    spdlog::info("Captured frame - width: {}, height: {}", width, height);
-
-    if (pixels.empty() || width <= 0 || height <= 0) {
-        spdlog::error("Invalid frame data - width: {}, height: {}, pixels size: {}", width, height,
-                      pixels.size());
+bool ProcessCapture::SaveBMP(const std::vector<uint8_t> &pixels, const char *filename) {
+    spdlog::info("Saving BMP to {}, pixels size: {}", filename, pixels.size());
+    if (pixels.size() != this->processWindowWidth * this->processWindowHeight * 4) {
+        std::cerr << "Invalid pixel data size" << std::endl;
         return false;
     }
 
-    // Create a test BMP first to verify our BMP format is correct
-    std::string testFilename = filename + "_test.bmp";
-    if (CreateTestBMP(testFilename, width, height)) {
-        spdlog::info("Created test BMP for verification: {}", testFilename);
-    }
+    BITMAPFILEHEADER fileHeader = {};
+    BITMAPINFOHEADER infoHeader = {};
 
-    // Calculate row padding (BMP requires 4-byte alignment)
-    int bytesPerPixel = 3;                               // 24-bit RGB
-    int rowSize = ((width * bytesPerPixel + 3) / 4) * 4; // Round up to 4-byte boundary
-    int padding = rowSize - (width * bytesPerPixel);
-    int imageSize = rowSize * height;
-
-    spdlog::info(
-        "BMP calculations - Width: {}, Height: {}, RowSize: {}, Padding: {}, ImageSize: {}", width,
-        height, rowSize, padding, imageSize);
-
-    // Validate pixel data size
-    int expectedPixelSize = width * height * bytesPerPixel;
-    if (pixels.size() != expectedPixelSize) {
-        spdlog::error("Pixel data size mismatch - expected: {}, actual: {}", expectedPixelSize,
-                      pixels.size());
-        return false;
-    }
-
-    // Create BMP headers with proper initialization
-    BITMAPFILEHEADER fileHeader;
-    memset(&fileHeader, 0, sizeof(fileHeader));
-    fileHeader.bfType = 0x4D42; // "BM"
-    fileHeader.bfSize = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + imageSize;
-    fileHeader.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
-    fileHeader.bfReserved1 = 0;
-    fileHeader.bfReserved2 = 0;
-
-    BITMAPINFOHEADER infoHeader;
-    memset(&infoHeader, 0, sizeof(infoHeader));
     infoHeader.biSize = sizeof(BITMAPINFOHEADER);
-    infoHeader.biWidth = width;
-    infoHeader.biHeight = -height; // Negative for top-down bitmap
+    infoHeader.biWidth = this->processWindowWidth;
+    infoHeader.biHeight = -this->processWindowHeight; // Negative for top-down bitmap
     infoHeader.biPlanes = 1;
-    infoHeader.biBitCount = 24;
+    infoHeader.biBitCount = 32; // BGRA format
     infoHeader.biCompression = BI_RGB;
-    infoHeader.biSizeImage = imageSize;
-    infoHeader.biXPelsPerMeter = 0;
-    infoHeader.biYPelsPerMeter = 0;
-    infoHeader.biClrUsed = 0;
-    infoHeader.biClrImportant = 0;
 
-    spdlog::info("BMP Headers - FileSize: {}, OffBits: {}, Width: {}, Height: {}, SizeImage: {}",
-                 fileHeader.bfSize, fileHeader.bfOffBits, infoHeader.biWidth, infoHeader.biHeight,
-                 infoHeader.biSizeImage);
+    fileHeader.bfType = 0x4D42; // "BM"
+    fileHeader.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+    fileHeader.bfSize =
+        fileHeader.bfOffBits + (this->processWindowWidth * this->processWindowHeight * 4);
 
-    FILE *file = fopen(filename.c_str(), "wb");
-    if (!file) {
-        spdlog::error("Failed to open file: {}", filename);
+    HANDLE hFile = CreateFileA(filename, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                               FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        std::cerr << "Failed to create file" << std::endl;
         return false;
     }
 
-    // Write headers
-    if (fwrite(&fileHeader, sizeof(fileHeader), 1, file) != 1) {
-        spdlog::error("Failed to write file header");
-        fclose(file);
-        return false;
-    }
+    DWORD written;
+    WriteFile(hFile, &fileHeader, sizeof(fileHeader), &written, nullptr);
+    WriteFile(hFile, &infoHeader, sizeof(infoHeader), &written, nullptr);
+    WriteFile(hFile, pixels.data(), pixels.size(), &written, nullptr);
 
-    if (fwrite(&infoHeader, sizeof(infoHeader), 1, file) != 1) {
-        spdlog::error("Failed to write info header");
-        fclose(file);
-        return false;
-    }
-
-    // Write pixel data with proper row padding
-    const unsigned char *pixelPtr = pixels.data();
-    size_t totalBytesWritten = 0;
-
-    for (int y = 0; y < height; y++) {
-        // Write row data (BGR format)
-        size_t rowBytes = width * bytesPerPixel;
-        if (fwrite(pixelPtr, rowBytes, 1, file) != 1) {
-            spdlog::error("Failed to write pixel row {}", y);
-            fclose(file);
-            return false;
-        }
-        totalBytesWritten += rowBytes;
-
-        // Write padding if needed (BMP requires 4-byte row alignment)
-        if (padding > 0) {
-            static const unsigned char paddingBytes[4] = {0, 0, 0, 0};
-            if (fwrite(paddingBytes, padding, 1, file) != 1) {
-                spdlog::error("Failed to write row padding for row {}", y);
-                fclose(file);
-                return false;
-            }
-            totalBytesWritten += padding;
-        }
-
-        pixelPtr += width * bytesPerPixel;
-    }
-
-    spdlog::info("Wrote {} bytes of pixel data (expected: {})", totalBytesWritten, imageSize);
-
-    // Verify we wrote the correct amount
-    if (totalBytesWritten != imageSize) {
-        spdlog::error("Pixel data write mismatch - wrote: {}, expected: {}", totalBytesWritten,
-                      imageSize);
-        fclose(file);
-        return false;
-    }
-
-    fclose(file);
-
-    // Verify file was created and has correct size
-    FILE *verifyFile = fopen(filename.c_str(), "rb");
-    if (verifyFile) {
-        fseek(verifyFile, 0, SEEK_END);
-        long fileSize = ftell(verifyFile);
-        fclose(verifyFile);
-
-        long expectedFileSize = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + imageSize;
-        spdlog::info("BMP file verification - Expected size: {} bytes, Actual size: {} bytes",
-                     expectedFileSize, fileSize);
-
-        if (fileSize == expectedFileSize) {
-            spdlog::info("Successfully saved BMP file: {} ({}x{} pixels, {} bytes)", filename,
-                         width, height, fileSize);
-        } else {
-            spdlog::error("BMP file size mismatch - file may be corrupted");
-            return false;
-        }
-    } else {
-        spdlog::error("Failed to verify BMP file after creation");
-        return false;
-    }
-
+    CloseHandle(hFile);
     return true;
 }

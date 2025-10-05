@@ -133,7 +133,7 @@ bool SaveFrameToBMP(const std::vector<unsigned char> &pixels, int width, int hei
     infoHeader.biWidth = width;
     infoHeader.biHeight = -height;
     infoHeader.biPlanes = 1;
-    infoHeader.biBitCount = 24;
+    infoHeader.biBitCount = 32;
     infoHeader.biCompression = BI_RGB;
 
     FILE *file = fopen(filename.c_str(), "wb");
@@ -150,8 +150,13 @@ bool SaveFrameToBMP(const std::vector<unsigned char> &pixels, int width, int hei
 int main() {
     std::string server_address("localhost:50051");
 
+    grpc::ChannelArguments args;
+    args.SetMaxReceiveMessageSize(100 * 1024 * 1024); // 100MB
+    args.SetMaxSendMessageSize(100 * 1024 * 1024);    // 100MB
+
     // Create a channel to the server
-    SiphonClient client(grpc::CreateChannel(server_address, grpc::InsecureChannelCredentials()));
+    SiphonClient client(
+        grpc::CreateCustomChannel(server_address, grpc::InsecureChannelCredentials(), args));
 
     std::cout << "gRPC Siphon Client" << std::endl;
     std::cout << "Commands: get <attribute>, set <attribute> <value>, input <key> <value>, capture "

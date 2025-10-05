@@ -29,12 +29,12 @@ class SiphonServiceImpl final : public SiphonService::Service {
   private:
     ProcessMemory *memory_;
     ProcessInput *input_;
-    HWND processWindow_;
+    ProcessCapture *capture_;
     mutable std::mutex mutex_;
 
   public:
-    SiphonServiceImpl(ProcessMemory *memory, ProcessInput *input, HWND processWindow)
-        : memory_(memory), input_(input), processWindow_(processWindow) {}
+    SiphonServiceImpl(ProcessMemory *memory, ProcessInput *input, ProcessCapture *capture)
+        : memory_(memory), input_(input), capture_(capture) {}
 
     Status GetAttribute(ServerContext *context, const GetSiphonRequest *request,
                         GetSiphonResponse *response) override {
@@ -108,31 +108,27 @@ class SiphonServiceImpl final : public SiphonService::Service {
     Status CaptureFrame(ServerContext *context, const CaptureFrameRequest *request,
                         CaptureFrameResponse *response) override {
         // TODO: Add error handling
-        int width, height;
-        if (processWindow_ != 0) {
-            auto pixels = CaptureFrameInternal(processWindow_, width, height);
-            response->set_width(width);
-            response->set_height(height);
-            response->set_frame(reinterpret_cast<const char *>(pixels.data()), pixels.size());
-            SaveFrameToBMP(processWindow_, "frame.bmp");
-            spdlog::info("Frame captured successfully - width: {}, height: {}", width, height);
-            response->set_success(true);
-            response->set_message("Frame captured successfully");
-        } else {
-            spdlog::error("Process window not initialized");
-            response->set_success(false);
-            response->set_message("Process window not initialized");
-            return Status::OK;
-        }
+        auto pixels = capture_->GetPixelData();
+        response->set_width(capture_->processWindowWidth);
+        response->set_height(capture_->processWindowHeight);
+        response->set_frame(reinterpret_cast<const char *>(pixels.data()), pixels.size());
+        // capture_->SaveBMP(pixels, "frame.bmp");
+        spdlog::info("Frame captured successfully - width: {}, height: {}",
+                     capture_->processWindowWidth, capture_->processWindowHeight);
+        response->set_success(true);
+        response->set_message("Frame captured successfully");
+
         return Status::OK;
     }
 };
 
-void RunServer(ProcessMemory *memory, ProcessInput *input, HWND processWindow) {
+void RunServer(ProcessMemory *memory, ProcessInput *input, ProcessCapture *capture) {
     std::string server_address("0.0.0.0:50051");
-    SiphonServiceImpl service(memory, input, processWindow);
+    SiphonServiceImpl service(memory, input, capture);
 
     ServerBuilder builder;
+    builder.SetMaxReceiveMessageSize(100 * 1024 * 1024); // 100MB
+    builder.SetMaxSendMessageSize(100 * 1024 * 1024);    // 100MB
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
     builder.RegisterService(&service);
 

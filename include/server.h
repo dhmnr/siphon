@@ -6,4 +6,4 @@
 #include <cstdint>
 #include <windows.h>
 
-void RunServer(ProcessMemory *memory, ProcessInput *input, HWND processWindow);
+void RunServer(ProcessMemory *memory, ProcessInput *input, ProcessCapture *capture);

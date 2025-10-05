@@ -56,19 +56,27 @@ int main() {
     spdlog::info("Process name: {}", processName);
 
     GetProcessWindow(&processWindowName, &processWindow);
-    SaveFrameToBMP(processWindow, "process_window.bmp");
 
     ProcessMemory memory(processName, processAttributes);
     ProcessInput input_(processWindow);
-    ;
+    ProcessCapture capture;
+
+    if (capture.Initialize(processWindow)) {
+        spdlog::info("Process capture initialized successfully!");
+    } else {
+        spdlog::error("Failed to initialize process capture!");
+    }
     if (memory.Initialize()) {
         spdlog::info("Process memory initialized successfully!");
     } else {
         spdlog::error("Failed to initialize process memory!");
     }
+    // std::vector<uint8_t> pixels = capture.GetPixelData();
+    // spdlog::info("Pixels size: {}", pixels.size());
+    // capture.SaveBMP(pixels, "frame.bmp");
 
     spdlog::info("Starting gRPC Variable Service Server...");
-    // RunServer(&memory, &input_, processWindow);
+    RunServer(&memory, &input_, &capture);
     spdlog::info("================================================");
     spdlog::info("Exiting Siphon Server");
     spdlog::info("================================================");
