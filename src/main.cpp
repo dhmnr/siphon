@@ -6,6 +6,7 @@
 #include "spdlog/sinks/rotating_file_sink.h"
 #include "spdlog/spdlog.h"
 #include "utils.h"
+#include <CLI/CLI.hpp>
 #include <iostream>
 #include <map>
 #include <psapi.h>
@@ -33,8 +34,14 @@ void InitLogger(bool use_stdout) {
     spdlog::flush_every(std::chrono::seconds(3));
     spdlog::flush_on(spdlog::level::warn);
 }
-int main() {
+int main(int argc, char *argv[]) {
     InitLogger(true);
+    CLI::App app;
+    std::string config;
+    app.add_option("--config", config, "Config file path, defaults to siphon_config.toml")
+        ->default_str("siphon_config.toml");
+    CLI11_PARSE(app, argc, argv);
+
     spdlog::info("================================================");
     spdlog::info("Starting Siphon Server v0.0.1");
     spdlog::info("================================================");
@@ -49,9 +56,8 @@ int main() {
         system("pause");
         return 1;
     }
-    // TODO: Get attribute file from command line
-    GetProcessInfoFromTOML("siphon_config.toml", &processName, &processAttributes,
-                           &processWindowName);
+    // Get attribute file from command line
+    GetProcessInfoFromTOML(config, &processName, &processAttributes, &processWindowName);
     PrintProcessAttributes(processAttributes);
     spdlog::info("Process window name: {} | Process name: {}", processWindowName, processName);
 

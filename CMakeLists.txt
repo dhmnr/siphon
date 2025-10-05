@@ -16,6 +16,7 @@ find_package(Protobuf REQUIRED)
 find_package(gRPC REQUIRED)
 find_package(tomlplusplus CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
+find_package(CLI11 CONFIG REQUIRED)
 
 
 # Generate protobuf and gRPC files
@@ -66,6 +67,7 @@ include_directories(${Protobuf_INCLUDE_DIRS})
 include_directories(${gRPC_INCLUDE_DIRS})
 include_directories(${tomlplusplus_INCLUDE_DIRS})
 include_directories(${spdlog_INCLUDE_DIRS})
+include_directories(${CLI11_INCLUDE_DIRS})
 include_directories(${INTERCEPTION_SDK_PATH}/include)
 
 # Server executable
@@ -93,6 +95,7 @@ target_link_libraries(siphon
     protobuf::libprotobuf
     tomlplusplus::tomlplusplus
     spdlog::spdlog
+    CLI11::CLI11
 )
 
 # Link Interception library
