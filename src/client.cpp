@@ -200,6 +200,7 @@ int main() {
             std::string key;
             std::string value;
             if (std::cin >> key >> value) {
+                // std::this_thread::sleep_for(std::chrono::milliseconds(2000));
                 if (client.InputKey(key, value)) {
                     std::cout << "Key " << key << " inputted successfully" << std::endl;
                 }

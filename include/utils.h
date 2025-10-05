@@ -20,11 +20,12 @@ static BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
     EnumWindowsData *data = reinterpret_cast<EnumWindowsData *>(lParam);
 
     // Debug: Print all windows that contain our target name
-    if (strstr(title, data->processWindowName->c_str()) != nullptr ||
-        strstr(className, data->processWindowName->c_str()) != nullptr) {
-        printf("DEBUG: Found window - Title: '%s', Class: '%s', Visible: %s\n", title, className,
-               IsWindowVisible(hwnd) ? "Yes" : "No");
-    }
+    // if (strstr(title, data->processWindowName->c_str()) != nullptr ||
+    //     strstr(className, data->processWindowName->c_str()) != nullptr) {
+    //     // printf("DEBUG: Found window - Title: '%s', Class: '%s', Visible: %s\n", title,
+    //     className,
+    //         //    IsWindowVisible(hwnd) ? "Yes" : "No");
+    // }
 
     // Check if this is the process (starts with "processWindowName")
     size_t nameLen = data->processWindowName->length();
@@ -32,7 +33,7 @@ static BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
         strncmp(className, data->processWindowName->c_str(), nameLen) == 0) {
         if (IsWindowVisible(hwnd)) {
             *(data->gameWindow) = hwnd;
-            printf("DEBUG: Selected window - Title: '%s', HWND: 0x%p\n", title, hwnd);
+            // printf("DEBUG: Selected window - Title: '%s', HWND: 0x%p\n", title, hwnd);
             return FALSE; // Stop enumeration
         }
     }
@@ -45,3 +46,4 @@ bool GetProcessInfoFromTOML(const std::string &filepath, std::string *processNam
                             std::string *processWindowName);
 void PrintProcessAttributes(const std::map<std::string, ProcessAttribute> &attributes);
 bool GetProcessWindow(const std::string *processWindowName, HWND *gameWindow);
+bool BringToFocus(HWND processWindow);

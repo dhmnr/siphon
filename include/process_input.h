@@ -15,11 +15,10 @@ class ProcessInput {
     InterceptionDevice keyboard;
 
   public:
-    ProcessInput(HWND processWindow);
+    ProcessInput();
     ~ProcessInput();
-    bool IsInitialized() const;
-    bool BringToFocus();
+    bool Initialize(HWND processWindow);
     void PressKey(std::string key);
     void ReleaseKey(std::string key);
-    void TapKey(std::string key, int holdMs = 5000);
+    bool TapKey(std::string key, int holdMs = 5000);
 };

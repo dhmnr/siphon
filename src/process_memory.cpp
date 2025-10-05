@@ -82,11 +82,9 @@ bool ProcessMemory::Initialize() {
         return false;
     }
 
-    spdlog::info("Successfully attached to {} (PID: {})", processName, processId);
-    spdlog::info("Base address: 0x{:x}", baseAddress);
-    spdlog::info("Module size: 0x{:x}", moduleSize);
-    spdlog::info("Base address: 0x{:x}", baseAddress);
-    spdlog::info("Module size: 0x{:x}", moduleSize);
+    spdlog::info(
+        "Successfully attached to {} (PID: {} | Base address: 0x{:x} | Module size: 0x{:x})",
+        processName, processId, baseAddress, moduleSize);
 
     return true;
 }

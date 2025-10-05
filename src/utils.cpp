@@ -3,6 +3,7 @@
 #include <cstring>
 #include <iostream>
 #include <spdlog/spdlog.h>
+#include <sstream>
 #include <toml++/toml.h>
 #include <vector>
 #include <windows.h>
@@ -90,14 +91,14 @@ bool GetProcessInfoFromTOML(const std::string &filepath, std::string *processNam
 
 void PrintProcessAttributes(const std::map<std::string, ProcessAttribute> &attributes) {
     for (const auto &[name, attr] : attributes) {
-        spdlog::info("Attribute Name: {}", name);
-        spdlog::info("Attribute Pattern: {}", attr.AttributePattern);
-        spdlog::info("Attribute Type: {}", attr.AttributeType);
-        spdlog::info("Attribute Offsets: ");
+        std::string offsets;
         for (const auto &offset : attr.AttributeOffsets) {
-            spdlog::info("0x{:x}", offset);
+            std::stringstream ss;
+            ss << "0x" << std::hex << offset;
+            offsets += ss.str() + " ";
         }
-        spdlog::info("Attribute Offsets: ");
+        spdlog::info("Attribute: {} | Type: {} | Pattern: {} | Offsets: {}", name,
+                     attr.AttributeType, attr.AttributePattern, offsets);
     }
 }
 
@@ -106,4 +107,23 @@ bool GetProcessWindow(const std::string *processWindowName, HWND *gameWindow) {
     EnumWindowsData data = {processWindowName, gameWindow};
     EnumWindows(EnumWindowsProc, reinterpret_cast<LPARAM>(&data));
     return *gameWindow != nullptr;
+}
+
+// Ensure game window is in focus
+bool BringToFocus(HWND processWindow) {
+    if (!processWindow)
+        return false;
+
+    // Check if already focused
+    if (GetForegroundWindow() == processWindow) {
+        return true;
+    }
+
+    keybd_event(VK_MENU, 0, 0, 0); // Alt down
+    SetForegroundWindow(processWindow);
+    keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0); // Alt up
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+
+    return GetForegroundWindow() == processWindow;
 }

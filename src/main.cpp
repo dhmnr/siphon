@@ -36,8 +36,9 @@ void InitLogger(bool use_stdout) {
 int main() {
     InitLogger(true);
     spdlog::info("================================================");
-    spdlog::info("Starting Siphon Server");
+    spdlog::info("Starting Siphon Server v0.0.1");
     spdlog::info("================================================");
+
     std::string processName;
     std::string processWindowName;
     std::map<std::string, ProcessAttribute> processAttributes;
@@ -49,16 +50,15 @@ int main() {
         return 1;
     }
     // TODO: Get attribute file from command line
-    GetProcessInfoFromTOML("attributes.toml", &processName, &processAttributes, &processWindowName);
-    // PrintProcessAttributes(attributes);
+    GetProcessInfoFromTOML("siphon_config.toml", &processName, &processAttributes,
+                           &processWindowName);
     PrintProcessAttributes(processAttributes);
-    spdlog::info("Process window name: {}", processWindowName);
-    spdlog::info("Process name: {}", processName);
+    spdlog::info("Process window name: {} | Process name: {}", processWindowName, processName);
 
     GetProcessWindow(&processWindowName, &processWindow);
 
     ProcessMemory memory(processName, processAttributes);
-    ProcessInput input_(processWindow);
+    ProcessInput input_;
     ProcessCapture capture;
 
     if (capture.Initialize(processWindow)) {
@@ -71,9 +71,17 @@ int main() {
     } else {
         spdlog::error("Failed to initialize process memory!");
     }
-    // std::vector<uint8_t> pixels = capture.GetPixelData();
-    // spdlog::info("Pixels size: {}", pixels.size());
-    // capture.SaveBMP(pixels, "frame.bmp");
+    if (input_.Initialize(processWindow)) {
+        spdlog::info("Process input initialized successfully!");
+    } else {
+        spdlog::error("Failed to initialize process input!");
+    }
+
+    if (BringToFocus(processWindow)) {
+        spdlog::info("Process window focused successfully!");
+    } else {
+        spdlog::error("Failed to focus process window!");
+    }
 
     spdlog::info("Starting gRPC Variable Service Server...");
     RunServer(&memory, &input_, &capture);
