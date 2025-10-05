@@ -12,13 +12,7 @@ target_link_libraries(siphon psapi user32)
 add_executable(list_windows list_windows.cpp)
 target_link_libraries(list_windows psapi user32)
 
-add_executable(capture_window capture_window.cpp)
 
-target_link_libraries(capture_window 
-    windowsapp
-    d3d11
-    dxgi
-)
 set(INTERCEPTION_SDK_PATH "${CMAKE_SOURCE_DIR}/external/interception")
 
 # Add Interception include directory
@@ -52,3 +46,40 @@ else()
             $<TARGET_FILE_DIR:elden_ring_controller>
     )
 endif()
+
+add_executable(capture_window 
+    capture_window.cpp
+)
+
+# Link Windows libraries
+target_link_libraries(capture_window
+    d3d11
+    dxgi
+    windowsapp
+)
+
+# Enable C++/WinRT
+if(MSVC)
+    target_compile_options(capture_window PRIVATE /await)
+    set_target_properties(capture_window PROPERTIES
+        VS_GLOBAL_CppWinRTEnabled true
+        VS_GLOBAL_CppWinRTVerbosity high
+    )
+endif()
+
+# Set Windows subsystem to console
+if(MSVC)
+    set_target_properties(capture_window PROPERTIES
+        WIN32_EXECUTABLE FALSE
+    )
+endif()
+
+# Optional: Set output directory
+set_target_properties(capture_window PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+# Print build info
+message(STATUS "Configuring Elden Ring Capture")
+message(STATUS "C++ Standard: ${CMAKE_CXX_STANDARD}")
+message(STATUS "Compiler: ${CMAKE_CXX_COMPILER_ID}")
