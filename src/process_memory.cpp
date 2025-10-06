@@ -224,18 +224,46 @@ bool ProcessMemory::ReadPtr(uintptr_t address, uintptr_t &value) {
            bytesRead == sizeof(uintptr_t);
 }
 
-bool ProcessMemory::ReadInt32(uintptr_t address, int32_t &value) {
+bool ProcessMemory::ReadInt(uintptr_t address, int32_t &value) {
     SIZE_T bytesRead;
     return ReadProcessMemory(processHandle, reinterpret_cast<LPCVOID>(address), &value,
                              sizeof(int32_t), &bytesRead) &&
            bytesRead == sizeof(int32_t);
 }
 
-bool ProcessMemory::WriteInt32(uintptr_t address, const int32_t &value) {
+bool ProcessMemory::WriteInt(uintptr_t address, const int32_t &value) {
     SIZE_T bytesWritten;
     return WriteProcessMemory(processHandle, reinterpret_cast<LPVOID>(address), &value,
                               sizeof(int32_t), &bytesWritten) &&
            bytesWritten == sizeof(int32_t);
+}
+
+bool ProcessMemory::ReadFloat(uintptr_t address, float &value) {
+    SIZE_T bytesRead;
+    return ReadProcessMemory(processHandle, reinterpret_cast<LPCVOID>(address), &value,
+                             sizeof(float), &bytesRead) &&
+           bytesRead == sizeof(float);
+}
+
+bool ProcessMemory::WriteFloat(uintptr_t address, const float &value) {
+    SIZE_T bytesWritten;
+    return WriteProcessMemory(processHandle, reinterpret_cast<LPVOID>(address), &value,
+                              sizeof(float), &bytesWritten) &&
+           bytesWritten == sizeof(float);
+}
+
+bool ProcessMemory::ReadArray(uintptr_t address, std::vector<uint8_t> &value) {
+    SIZE_T bytesRead;
+    return ReadProcessMemory(processHandle, reinterpret_cast<LPCVOID>(address), value.data(),
+                             value.size(), &bytesRead) &&
+           bytesRead == value.size();
+}
+
+bool ProcessMemory::WriteArray(uintptr_t address, const std::vector<uint8_t> &value) {
+    SIZE_T bytesWritten;
+    return WriteProcessMemory(processHandle, reinterpret_cast<LPVOID>(address), value.data(),
+                              value.size(), &bytesWritten) &&
+           bytesWritten == value.size();
 }
 
 uintptr_t ProcessMemory::ResolvePointerChain(uintptr_t baseAddress,
@@ -274,7 +302,12 @@ uintptr_t ProcessMemory::ResolvePointerChain(uintptr_t baseAddress,
     return finalAddress;
 }
 
-bool ProcessMemory::ExtractAttribute(std::string attributeName, int32_t &value) {
+bool ProcessMemory::ExtractAttributeInt(std::string attributeName, int32_t &value) {
+    if (processAttributes[attributeName].AttributeType != "int") {
+        spdlog::error("Attribute {} is not an int", attributeName);
+        return false;
+    }
+
     uintptr_t ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
     spdlog::info("Pointer found at: 0x{:x}", ptr);
 
@@ -282,7 +315,7 @@ bool ProcessMemory::ExtractAttribute(std::string attributeName, int32_t &value) 
         ResolvePointerChain(ptr, processAttributes[attributeName].AttributeOffsets);
     spdlog::info("{} found at: 0x{:x}", attributeName, attributeAddress);
 
-    if (!ReadInt32(attributeAddress, value)) {
+    if (!ReadInt(attributeAddress, value)) {
         return false;
     }
     spdlog::info("{} value: {}", attributeName, value);
@@ -290,7 +323,12 @@ bool ProcessMemory::ExtractAttribute(std::string attributeName, int32_t &value) 
     return true;
 }
 
-bool ProcessMemory::WriteAttribute(std::string attributeName, const int32_t &value) {
+bool ProcessMemory::WriteAttributeInt(std::string attributeName, const int32_t &value) {
+    if (processAttributes[attributeName].AttributeType != "int") {
+        spdlog::error("Attribute {} is not an int", attributeName);
+        return false;
+    }
+
     uintptr_t ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
 
     spdlog::info("Pointer found at: 0x{:x}", ptr);
@@ -299,5 +337,84 @@ bool ProcessMemory::WriteAttribute(std::string attributeName, const int32_t &val
         ResolvePointerChain(ptr, processAttributes[attributeName].AttributeOffsets);
     spdlog::info("{} found at: 0x{:x}", attributeName, attributeAddress);
 
-    return WriteInt32(attributeAddress, value);
+    return WriteInt(attributeAddress, value);
+}
+
+bool ProcessMemory::ExtractAttributeFloat(std::string attributeName, float &value) {
+    if (processAttributes[attributeName].AttributeType != "float") {
+        spdlog::error("Attribute {} is not a float", attributeName);
+        return false;
+    }
+
+    uintptr_t ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
+    spdlog::info("Pointer found at: 0x{:x}", ptr);
+
+    uintptr_t attributeAddress =
+        ResolvePointerChain(ptr, processAttributes[attributeName].AttributeOffsets);
+    spdlog::info("{} found at: 0x{:x}", attributeName, attributeAddress);
+
+    if (!ReadFloat(attributeAddress, value)) {
+        return false;
+    }
+    spdlog::info("{} value: {}", attributeName, value);
+
+    return true;
+}
+
+bool ProcessMemory::WriteAttributeFloat(std::string attributeName, const float &value) {
+    if (processAttributes[attributeName].AttributeType != "float") {
+        spdlog::error("Attribute {} is not a float", attributeName);
+        return false;
+    }
+
+    uintptr_t ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
+    spdlog::info("Pointer found at: 0x{:x}", ptr);
+
+    uintptr_t attributeAddress =
+        ResolvePointerChain(ptr, processAttributes[attributeName].AttributeOffsets);
+    spdlog::info("{} found at: 0x{:x}", attributeName, attributeAddress);
+
+    return WriteFloat(attributeAddress, value);
+}
+
+bool ProcessMemory::ExtractAttributeArray(std::string attributeName, std::vector<uint8_t> &value) {
+    if (processAttributes[attributeName].AttributeType != "array") {
+        spdlog::error("Attribute {} is not an array", attributeName);
+        return false;
+    }
+
+    uintptr_t ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
+    spdlog::info("Pointer found at: 0x{:x}", ptr);
+
+    uintptr_t attributeAddress =
+        ResolvePointerChain(ptr, processAttributes[attributeName].AttributeOffsets);
+    spdlog::info("{} found at: 0x{:x}", attributeName, attributeAddress);
+
+    if (!ReadArray(attributeAddress, value)) {
+        return false;
+    }
+    spdlog::info("{} value: [{} bytes]", attributeName, value.size());
+
+    return true;
+}
+
+bool ProcessMemory::WriteAttributeArray(std::string attributeName,
+                                        const std::vector<uint8_t> &value) {
+    if (processAttributes[attributeName].AttributeType != "array") {
+        spdlog::error("Attribute {} is not an array", attributeName);
+        return false;
+    }
+
+    uintptr_t ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
+    spdlog::info("Pointer found at: 0x{:x}", ptr);
+
+    uintptr_t attributeAddress =
+        ResolvePointerChain(ptr, processAttributes[attributeName].AttributeOffsets);
+    spdlog::info("{} found at: 0x{:x}", attributeName, attributeAddress);
+
+    return WriteArray(attributeAddress, value);
+}
+
+ProcessAttribute ProcessMemory::GetAttribute(std::string attributeName) {
+    return processAttributes[attributeName];
 }

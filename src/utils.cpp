@@ -76,6 +76,10 @@ bool GetProcessInfoFromTOML(const std::string &filepath, std::string *processNam
                         }
                     }
 
+                    if (auto length = (*attr_table)["length"].value<size_t>()) {
+                        attr.AttributeLength = *length;
+                    }
+
                     // Insert into map with key as the attribute name
                     (*processAttributes)[attr.AttributeName] = attr;
                 }
@@ -97,8 +101,13 @@ void PrintProcessAttributes(const std::map<std::string, ProcessAttribute> &attri
             ss << "0x" << std::hex << offset;
             offsets += ss.str() + " ";
         }
-        spdlog::info("Attribute: {} | Type: {} | Pattern: {} | Offsets: {}", name,
-                     attr.AttributeType, attr.AttributePattern, offsets);
+        if (attr.AttributeType == "array") {
+            spdlog::info("Attribute: {} | Type: {} | Pattern: {} | Offsets: {} | Length: {}", name,
+                         attr.AttributeType, attr.AttributePattern, offsets, attr.AttributeLength);
+        } else {
+            spdlog::info("Attribute: {} | Type: {} | Pattern: {} | Offsets: {}", name,
+                         attr.AttributeType, attr.AttributePattern, offsets);
+        }
     }
 }
 

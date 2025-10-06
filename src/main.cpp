@@ -89,7 +89,7 @@ int main(int argc, char *argv[]) {
         spdlog::error("Failed to focus process window!");
     }
 
-    spdlog::info("Starting gRPC Variable Service Server...");
+    spdlog::info("Starting gRPC Server...");
     RunServer(&memory, &input_, &capture);
     spdlog::info("================================================");
     spdlog::info("Exiting Siphon Server");

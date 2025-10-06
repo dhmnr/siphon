@@ -26,14 +26,25 @@ message GetSiphonRequest {
 
 // Response message for getting variable
 message GetSiphonResponse {
-  int32 value = 1;
-  string attributeName = 2;
+  bool success = 1;
+  string message = 2;
+  
+  oneof value {
+    int32 int_value = 3;
+    float float_value = 4;
+    bytes array_value = 5;
+  }
 }
 
 // Request message for setting variable
 message SetSiphonRequest {
-  int32 value = 1;
-  string attributeName = 2;
+  string attributeName = 1;
+  
+  oneof value {
+    int32 int_value = 2;
+    float float_value = 3;
+    bytes array_value = 4;
+  }
 }
 
 // Response message for setting variable

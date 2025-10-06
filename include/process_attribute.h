@@ -10,6 +10,7 @@ struct ProcessAttribute {
     std::string AttributePattern;
     std::vector<uintptr_t> AttributeOffsets;
     std::string AttributeType;
+    size_t AttributeLength;
 };
 
 // const std::string SiphonAttributes::WorldChrMan = "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88";

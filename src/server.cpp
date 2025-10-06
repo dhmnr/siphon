@@ -40,42 +40,7 @@ class SiphonServiceImpl final : public SiphonService::Service {
                         GetSiphonResponse *response) override {
         std::lock_guard<std::mutex> lock(mutex_);
 
-        int32_t attributeValue = 0;
-
-        if (memory_ != 0) {
-            // Read HP from game memory
-            bool success = memory_->ExtractAttribute(request->attributename(), attributeValue);
-            if (!success) {
-                spdlog::error("Failed to read {} from memory", request->attributename());
-                response->set_value(-1); // Error indicator
-            }
-        } else {
-            spdlog::error("Memory not initialized or {} address not found",
-                          request->attributename());
-            response->set_value(-1); // Error indicator
-        }
-
-        response->set_value(attributeValue);
-        spdlog::info("GetAttribute called - returning {} : {}", request->attributename(),
-                     attributeValue);
-        return Status::OK;
-    }
-
-    Status SetAttribute(ServerContext *context, const SetSiphonRequest *request,
-                        SetSiphonResponse *response) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const int32_t attributeValue = request->value();
-
-        if (memory_ != 0) {
-            // Write HP to game memory
-            bool success = memory_->WriteAttribute(request->attributename(), attributeValue);
-            if (!success) {
-                spdlog::error("Failed to write {} to memory", request->attributename());
-                response->set_success(false);
-                response->set_message("Failed to write " + request->attributename() + " to memory");
-                return Status::OK;
-            }
-        } else {
+        if (memory_ == nullptr) { // Changed from != 0
             spdlog::error("Memory not initialized or {} address not found",
                           request->attributename());
             response->set_success(false);
@@ -84,10 +49,84 @@ class SiphonServiceImpl final : public SiphonService::Service {
             return Status::OK;
         }
 
+        ProcessAttribute attribute = memory_->GetAttribute(request->attributename());
+        bool success = false;
+        std::string attributeValueStr; // For logging
+
+        if (attribute.AttributeType == "int") {
+            int32_t attributeValue = 0;
+            success = memory_->ExtractAttributeInt(request->attributename(), attributeValue);
+            if (success) {
+                response->set_int_value(attributeValue);
+                attributeValueStr = std::to_string(attributeValue);
+            }
+        } else if (attribute.AttributeType == "float") {
+            float attributeValue = 0;
+            success = memory_->ExtractAttributeFloat(request->attributename(), attributeValue);
+            if (success) {
+                response->set_float_value(attributeValue);
+                attributeValueStr = std::to_string(attributeValue);
+            }
+        } else if (attribute.AttributeType == "array") {
+            std::vector<uint8_t> attributeValue(attribute.AttributeLength);
+            success = memory_->ExtractAttributeArray(request->attributename(), attributeValue);
+            if (success) {
+                response->set_array_value(attributeValue.data(), attributeValue.size());
+                attributeValueStr =
+                    "[array of " + std::to_string(attributeValue.size()) + " bytes]";
+            }
+        }
+
+        if (!success) {
+            spdlog::error("Failed to read {} from memory", request->attributename());
+            response->set_success(false);
+            response->set_message("Failed to read " + request->attributename() + " from memory");
+            return Status::OK;
+        }
+
+        response->set_success(true);
+        response->set_message(request->attributename() + " read successfully");
+        spdlog::info("GetAttribute called - returning {} : {}", request->attributename(),
+                     attributeValueStr);
+
+        return Status::OK;
+    }
+
+    Status SetAttribute(ServerContext *context, const SetSiphonRequest *request,
+                        SetSiphonResponse *response) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (memory_ == nullptr) {
+            spdlog::error("Memory not initialized");
+            response->set_success(false);
+            response->set_message("Memory not initialized");
+            return Status::OK;
+        }
+
+        ProcessAttribute attribute = memory_->GetAttribute(request->attributename());
+        bool success = false;
+
+        if (attribute.AttributeType == "int") {
+            success = memory_->WriteAttributeInt(request->attributename(), request->int_value());
+        } else if (attribute.AttributeType == "float") {
+            success =
+                memory_->WriteAttributeFloat(request->attributename(), request->float_value());
+        } else if (attribute.AttributeType == "array") {
+            const auto &arrayValue = request->array_value();
+            std::vector<uint8_t> vec(arrayValue.begin(), arrayValue.end());
+            success = memory_->WriteAttributeArray(request->attributename(), vec);
+        }
+
+        if (!success) {
+            spdlog::error("Failed to write {} to memory", request->attributename());
+            response->set_success(false);
+            response->set_message("Failed to write " + request->attributename() + " to memory");
+            return Status::OK;
+        }
+
         response->set_success(true);
         response->set_message(request->attributename() + " set successfully");
 
-        spdlog::info("SetAttribute called - new value: {}", attributeValue);
         return Status::OK;
     }
 
@@ -137,9 +176,3 @@ void RunServer(ProcessMemory *memory, ProcessInput *input, ProcessCapture *captu
 
     server->Wait();
 }
-
-// int main() {
-//     spdlog::info("Starting gRPC Variable Service Server...");
-//     RunServer();
-//     return 0;
-// }
