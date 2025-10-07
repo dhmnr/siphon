@@ -78,6 +78,7 @@ add_executable(siphon
     src/process_input.cpp
     src/server.cpp
     src/process_capture.cpp
+    src/process_attribute.cpp
     ${PROTO_SRCS}
     ${GRPC_SRCS}
 )

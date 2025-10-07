@@ -34,6 +34,7 @@ void InitLogger(bool use_stdout) {
     spdlog::flush_every(std::chrono::seconds(3));
     spdlog::flush_on(spdlog::level::warn);
 }
+
 int main(int argc, char *argv[]) {
     InitLogger(true);
     CLI::App app;
