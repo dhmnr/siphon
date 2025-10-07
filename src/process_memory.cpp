@@ -1,7 +1,10 @@
 #include "process_memory.h"
+#include "dll_injector.h"
 #include "process_attribute.h"
+#include "shared_memory.h"
 #include "utils.h"
 #include <algorithm>
+#include <filesystem>
 #include <iostream>
 #include <ostream>
 #include <psapi.h>
@@ -170,7 +173,15 @@ uintptr_t ProcessMemory::AOBScan(const std::string &pattern, std::vector<bool> w
     return 0;
 }
 
-uintptr_t ProcessMemory::ExtractPtrFromInst(uintptr_t instructionAddress, int addressStartIndex) {
+uintptr_t ProcessMemory::FindPtrFromAOB(const std::string &pattern) {
+
+    std::vector<bool> wildcards = ParseWildcards(pattern);
+    uintptr_t instructionAddress = AOBScan(pattern, wildcards);
+    if (instructionAddress == 0) {
+        return 0;
+    }
+    int addressStartIndex =
+        static_cast<int>(std::find(wildcards.begin(), wildcards.end(), true) - wildcards.begin());
     uint8_t instruction[16];
     SIZE_T bytesRead;
 
@@ -186,12 +197,19 @@ uintptr_t ProcessMemory::ExtractPtrFromInst(uintptr_t instructionAddress, int ad
     spdlog::info("Found mov instruction with RIP-relative addressing");
     spdlog::info("Target address: 0x{:x}", targetAddress);
 
-    return targetAddress;
-    // TODO : Error handling
+    // Read the actual pointer value
+    uintptr_t ptrAddress;
+    if (!ReadProcessMemory(processHandle, reinterpret_cast<LPCVOID>(targetAddress), &ptrAddress,
+                           sizeof(ptrAddress), &bytesRead)) {
+        spdlog::error("Failed to read pointer at 0x{:x}", targetAddress);
+        return 0;
+    }
+
+    spdlog::info("Pointer found at: 0x{:x}", ptrAddress);
+    return ptrAddress;
 }
 
-uintptr_t ProcessMemory::FindPtrFromAOB(const std::string &pattern) {
-
+uintptr_t ProcessMemory::FindPtrFromDll(const std::string &pattern) {
     std::vector<bool> wildcards = ParseWildcards(pattern);
     uintptr_t instructionAddress = AOBScan(pattern, wildcards);
     if (instructionAddress == 0) {
@@ -199,21 +217,73 @@ uintptr_t ProcessMemory::FindPtrFromAOB(const std::string &pattern) {
     }
     int addressStartIndex =
         static_cast<int>(std::find(wildcards.begin(), wildcards.end(), true) - wildcards.begin());
-    uintptr_t pointerAddress = ExtractPtrFromInst(instructionAddress, addressStartIndex);
-    if (pointerAddress == 0) {
-        return 0;
-    }
 
-    // Read the actual pointer value
-    uintptr_t ptrAddress;
+    uint8_t instruction[16];
     SIZE_T bytesRead;
-    if (!ReadProcessMemory(processHandle, reinterpret_cast<LPCVOID>(pointerAddress), &ptrAddress,
-                           sizeof(ptrAddress), &bytesRead)) {
-        spdlog::error("Failed to read pointer at 0x{:x}", pointerAddress);
+
+    if (!ReadProcessMemory(processHandle, reinterpret_cast<LPCVOID>(instructionAddress),
+                           instruction, sizeof(instruction), &bytesRead)) {
+        spdlog::error("Failed to read instruction at 0x{:x}", instructionAddress);
         return 0;
     }
 
-    spdlog::info("Pointer found at: 0x{:x}", ptrAddress);
+    // 2. Get DLL path (must be absolute!)
+    std::filesystem::path dllPath = std::filesystem::current_path() / "hook.dll";
+    if (!std::filesystem::exists(dllPath)) {
+        std::cerr << "Error: hook.dll not found at: " << dllPath << std::endl;
+        return 1;
+    }
+    std::cout << "DLL path: " << dllPath << std::endl;
+
+    // 3. Inject DLL
+    std::cout << "Injecting DLL..." << std::endl;
+    if (!InjectDLL(processId, dllPath.string().c_str())) {
+        std::cerr << "Error: Failed to inject DLL!" << std::endl;
+        return 1;
+    }
+    std::cout << "DLL injected successfully!" << std::endl;
+
+    // 4. Wait for shared memory
+    SharedMemory sharedMem;
+    std::cout << "Waiting for shared memory..." << std::endl;
+    bool connected = false;
+    for (int i = 0; i < 20; i++) {
+        if (sharedMem.OpenShared()) {
+            std::cout << "Connected to shared memory!" << std::endl;
+            connected = true;
+            break;
+        }
+        Sleep(500);
+    }
+
+    if (!connected) {
+        std::cerr << "Error: Failed to connect to shared memory" << std::endl;
+        return 1;
+    }
+
+    // 6. Monitor NPC pointer
+    uintptr_t ptrAddress;
+    std::cout << "\nMonitoring NPC pointer... (target an enemy in game)\n" << std::endl;
+    while (true) {
+        if (sharedMem.data->npcPointer) {
+            std::cout << "NPC Pointer: 0x" << std::hex << (uintptr_t)sharedMem.data->npcPointer
+                      << std::dec << std::endl;
+
+            spdlog::info("Pointer found at: 0x{:x}", sharedMem.data->npcPointer);
+            uintptr_t attributeAddress = ResolvePointerChain(
+                (uintptr_t)sharedMem.data->npcPointer, processAttributes["NpcHp"].AttributeOffsets);
+            spdlog::info("NpcId found at: 0x{:x}", attributeAddress);
+            int32_t npcId;
+            if (!ReadInt(attributeAddress, npcId)) {
+                spdlog::error("Failed to read NpcId at 0x{:x}", attributeAddress);
+            }
+            spdlog::info("NpcId value: {}", npcId);
+        } else {
+            std::cout << "No target" << std::endl;
+        }
+
+        Sleep(1000);
+    }
     return ptrAddress;
 }
 
@@ -307,20 +377,20 @@ bool ProcessMemory::ExtractAttributeInt(std::string attributeName, int32_t &valu
         spdlog::error("Attribute {} is not an int", attributeName);
         return false;
     }
-
-    uintptr_t ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
-    spdlog::info("Pointer found at: 0x{:x}", ptr);
+    uintptr_t ptr;
+    if (processAttributes[attributeName].AttributeMethod == "dll") {
+        ptr = FindPtrFromDll(processAttributes[attributeName].AttributePattern);
+        spdlog::info("Pointer found at: 0x{:x}", ptr);
+    } else {
+        ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
+        spdlog::info("Pointer found at: 0x{:x}", ptr);
+    }
 
     uintptr_t attributeAddress =
         ResolvePointerChain(ptr, processAttributes[attributeName].AttributeOffsets);
     spdlog::info("{} found at: 0x{:x}", attributeName, attributeAddress);
 
-    if (!ReadInt(attributeAddress, value)) {
-        return false;
-    }
-    spdlog::info("{} value: {}", attributeName, value);
-
-    return true;
+    return ReadInt(attributeAddress, value);
 }
 
 bool ProcessMemory::WriteAttributeInt(std::string attributeName, const int32_t &value) {
@@ -328,8 +398,14 @@ bool ProcessMemory::WriteAttributeInt(std::string attributeName, const int32_t &
         spdlog::error("Attribute {} is not an int", attributeName);
         return false;
     }
-
-    uintptr_t ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
+    uintptr_t ptr;
+    if (processAttributes[attributeName].AttributeMethod == "dll") {
+        ptr = FindPtrFromDll(processAttributes[attributeName].AttributePattern);
+        spdlog::info("Pointer found at: 0x{:x}", ptr);
+    } else {
+        ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
+        spdlog::info("Pointer found at: 0x{:x}", ptr);
+    }
 
     spdlog::info("Pointer found at: 0x{:x}", ptr);
 
@@ -345,8 +421,14 @@ bool ProcessMemory::ExtractAttributeFloat(std::string attributeName, float &valu
         spdlog::error("Attribute {} is not a float", attributeName);
         return false;
     }
-
-    uintptr_t ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
+    uintptr_t ptr;
+    if (processAttributes[attributeName].AttributeMethod == "dll") {
+        ptr = FindPtrFromDll(processAttributes[attributeName].AttributePattern);
+        spdlog::info("Pointer found at: 0x{:x}", ptr);
+    } else {
+        ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
+        spdlog::info("Pointer found at: 0x{:x}", ptr);
+    }
     spdlog::info("Pointer found at: 0x{:x}", ptr);
 
     uintptr_t attributeAddress =
@@ -367,7 +449,14 @@ bool ProcessMemory::WriteAttributeFloat(std::string attributeName, const float &
         return false;
     }
 
-    uintptr_t ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
+    uintptr_t ptr;
+    if (processAttributes[attributeName].AttributeMethod == "dll") {
+        ptr = FindPtrFromDll(processAttributes[attributeName].AttributePattern);
+        spdlog::info("Pointer found at: 0x{:x}", ptr);
+    } else {
+        ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
+        spdlog::info("Pointer found at: 0x{:x}", ptr);
+    }
     spdlog::info("Pointer found at: 0x{:x}", ptr);
 
     uintptr_t attributeAddress =
@@ -383,7 +472,14 @@ bool ProcessMemory::ExtractAttributeArray(std::string attributeName, std::vector
         return false;
     }
 
-    uintptr_t ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
+    uintptr_t ptr;
+    if (processAttributes[attributeName].AttributeMethod == "dll") {
+        ptr = FindPtrFromDll(processAttributes[attributeName].AttributePattern);
+        spdlog::info("Pointer found at: 0x{:x}", ptr);
+    } else {
+        ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
+        spdlog::info("Pointer found at: 0x{:x}", ptr);
+    }
     spdlog::info("Pointer found at: 0x{:x}", ptr);
 
     uintptr_t attributeAddress =
@@ -404,8 +500,14 @@ bool ProcessMemory::WriteAttributeArray(std::string attributeName,
         spdlog::error("Attribute {} is not an array", attributeName);
         return false;
     }
-
-    uintptr_t ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
+    uintptr_t ptr;
+    if (processAttributes[attributeName].AttributeMethod == "dll") {
+        ptr = FindPtrFromDll(processAttributes[attributeName].AttributePattern);
+        spdlog::info("Pointer found at: 0x{:x}", ptr);
+    } else {
+        ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
+        spdlog::info("Pointer found at: 0x{:x}", ptr);
+    }
     spdlog::info("Pointer found at: 0x{:x}", ptr);
 
     uintptr_t attributeAddress =

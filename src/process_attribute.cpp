@@ -7,7 +7,6 @@
 #include <toml++/toml.h>
 #include <vector>
 
-
 bool GetProcessInfoFromTOML(const std::string &filepath, std::string *processName,
                             std::map<std::string, ProcessAttribute> *processAttributes,
                             std::string *processWindowName) {
@@ -58,6 +57,11 @@ bool GetProcessInfoFromTOML(const std::string &filepath, std::string *processNam
                         attr.AttributeLength = *length;
                     }
 
+                    if (auto method = (*attr_table)["method"].value<std::string>()) {
+                        attr.AttributeMethod = *method;
+                    } else {
+                        attr.AttributeMethod = "aobscan";
+                    }
                     // Insert into map with key as the attribute name
                     (*processAttributes)[attr.AttributeName] = attr;
                 }
@@ -80,11 +84,13 @@ void PrintProcessAttributes(const std::map<std::string, ProcessAttribute> &attri
             offsets += ss.str() + " ";
         }
         if (attr.AttributeType == "array") {
-            spdlog::info("Attribute: {} | Type: {} | Pattern: {} | Offsets: {} | Length: {}", name,
-                         attr.AttributeType, attr.AttributePattern, offsets, attr.AttributeLength);
+            spdlog::info(
+                "Attribute: {} | Type: {} | Pattern: {} | Offsets: {} | Length: {} | Method: {}",
+                name, attr.AttributeType, attr.AttributePattern, offsets, attr.AttributeLength,
+                attr.AttributeMethod);
         } else {
-            spdlog::info("Attribute: {} | Type: {} | Pattern: {} | Offsets: {}", name,
-                         attr.AttributeType, attr.AttributePattern, offsets);
+            spdlog::info("Attribute: {} | Type: {} | Pattern: {} | Offsets: {} | Method: {}", name,
+                         attr.AttributeType, attr.AttributePattern, offsets, attr.AttributeMethod);
         }
     }
 }

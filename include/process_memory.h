@@ -29,6 +29,7 @@ class ProcessMemory {
     uintptr_t AOBScan(const std::string &pattern, std::vector<bool> wildcards);
     uintptr_t ExtractPtrFromInst(uintptr_t instructionAddress, int addressStartIndex);
     uintptr_t FindPtrFromAOB(const std::string &pattern);
+    uintptr_t FindPtrFromDll(const std::string &pattern);
     uintptr_t ResolvePointerChain(uintptr_t baseAddress, const std::vector<uintptr_t> &offsets);
     bool ReadPtr(uintptr_t address, uintptr_t &value);
     bool ReadInt(uintptr_t address, int32_t &value);

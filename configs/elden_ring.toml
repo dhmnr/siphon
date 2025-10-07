@@ -98,7 +98,13 @@ type = "array"
 length = 1
 
 [attributes.NpcId]
-method = "inject"
+method = "dll"
 pattern = "48 8B 48 08 49 89 8D"
 offsets = [0x28, 0x124]
+type = "int"
+
+[attributes.NpcHp]
+method = "dll"
+pattern = "48 8B 48 08 49 89 8D"
+offsets = [0x190, 0x0, 0x138]
 type = "int"

@@ -79,6 +79,8 @@ add_executable(siphon
     src/server.cpp
     src/process_capture.cpp
     src/process_attribute.cpp
+    include/dll_injector.h
+    include/shared_memory.h
     ${PROTO_SRCS}
     ${GRPC_SRCS}
 )
@@ -134,4 +136,41 @@ add_executable(siphon_client
 target_link_libraries(siphon_client
     gRPC::grpc++
     protobuf::libprotobuf
+)
+
+
+# ============================================================================
+# DLL Project
+# ============================================================================
+add_library(hook SHARED
+    src/dll/dllmain.cpp
+    include/shared_memory.h
+)
+
+# Include directories
+target_include_directories(hook PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/external/minhook/include
+)
+
+# Link MinHook and Windows libraries
+target_link_libraries(hook PRIVATE 
+    ${CMAKE_SOURCE_DIR}/external/minhook/lib/libMinHook.x64.lib
+    psapi
+)
+
+set_target_properties(hook PROPERTIES
+    OUTPUT_NAME "hook"
+    SUFFIX ".dll"
+)
+
+# ============================================================================
+# Copy DLL to server directory after build
+# ============================================================================
+add_custom_command(TARGET hook POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "$<TARGET_FILE:hook>"
+        "$<TARGET_FILE_DIR:siphon>/hook.dll"
+    COMMENT "Copying hook.dll to server directory"
+    VERBATIM
 )

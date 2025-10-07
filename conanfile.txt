@@ -4,6 +4,7 @@ protobuf/3.21.12
 tomlplusplus/3.4.0
 spdlog/1.15.3
 cli11/2.5.0
+minhook/1.3.4
 
 [generators]
 CMakeDeps
@@ -18,3 +19,4 @@ protobuf/*:shared=False
 tomlplusplus/*:shared=False
 spdlog/*:shared=False
 cli11/*:shared=False
+minhook/*:shared=False
