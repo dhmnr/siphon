@@ -47,8 +47,58 @@ pattern = "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88"
 offsets = [0x10EF8, 0x0, 0x190, 0x28, 0x17C8]
 type = "float"
 
-[attributes.MapRelCoords]
+[attributes.LocalPosX]
+pattern = "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88" 
+offsets = [0x10EF8, 0x0, 0x190, 0x68, 0x70]
+type = "float"
+
+[attributes.LocalPosY]
+pattern = "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88" 
+offsets = [0x10EF8, 0x0, 0x190, 0x68, 0x74]
+type = "float"
+
+[attributes.LocalPosZ]
+pattern = "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88" 
+offsets = [0x10EF8, 0x0, 0x190, 0x68, 0x78]
+type = "float"
+
+[attributes.GlobalPosX]
 pattern = "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88" 
 offsets = [0x10EF8, 0x0, 0x6C0]
+type = "float"
+
+
+[attributes.GlobalPosY]
+pattern = "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88" 
+offsets = [0x10EF8, 0x0, 0x6C4]
+type = "float"
+
+
+[attributes.GlobalPosZ]
+pattern = "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88" 
+offsets = [0x10EF8, 0x0, 0x6C8]
+type = "float"
+
+
+[attributes.AngleRad]
+pattern = "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88" 
+offsets = [0x10EF8, 0x0, 0x6CC]
+type = "float"
+
+
+[attributes.MapId]
+pattern = "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88" 
+offsets = [0x10EF8, 0x0, 0x6D0]
+type = "float"
+
+[attributes.Gravity]
+pattern = "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88" 
+offsets =  [0x10EF8, 0x0, 0x190, 0x68, 0x1D3]
 type = "array"
-length = 20
+length = 1
+
+[attributes.NpcId]
+method = "inject"
+pattern = "48 8B 48 08 49 89 8D"
+offsets = [0x28, 0x124]
+type = "int"
