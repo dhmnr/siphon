@@ -2,7 +2,9 @@
 #include <Windows.h>
 
 struct TargetedNpcInfo {
-    void *npcPointer;
+    void *npcPointer;      // NPC pointer captured by hook
+    uintptr_t hookAddress; // Address to hook (set by executable)
+    bool hookReady;        // Signal DLL to start hooking
 };
 
 class SharedMemory {

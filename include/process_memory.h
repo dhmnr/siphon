@@ -1,11 +1,11 @@
 #pragma once
 
 #include "process_attribute.h"
+#include "shared_memory.h"
 #include <map>
 #include <string>
 #include <vector>
 #include <windows.h>
-
 class ProcessMemory {
   private:
     DWORD processId;
@@ -14,6 +14,9 @@ class ProcessMemory {
     size_t moduleSize;
     std::string processName;
     std::map<std::string, ProcessAttribute> processAttributes;
+    std::map<std::string, uintptr_t> injectedAddresses;
+    bool dllInjected;
+    SharedMemory sharedMem;
 
   public:
     ProcessMemory(const std::string &processName,

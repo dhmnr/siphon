@@ -17,7 +17,7 @@
 ProcessMemory::ProcessMemory(const std::string &processName,
                              const std::map<std::string, ProcessAttribute> &processAttributes)
     : processId(0), processHandle(nullptr), baseAddress(0), moduleSize(0), processName(processName),
-      processAttributes(processAttributes) {}
+      processAttributes(processAttributes), injectedAddresses(), dllInjected(false), sharedMem() {}
 
 ProcessMemory::~ProcessMemory() {
     if (processHandle) {
@@ -210,6 +210,36 @@ uintptr_t ProcessMemory::FindPtrFromAOB(const std::string &pattern) {
 }
 
 uintptr_t ProcessMemory::FindPtrFromDll(const std::string &pattern) {
+
+    // if (injectedAddresses.find(pattern) != injectedAddresses.end()) {
+    //     spdlog::info("Pointer found at cached address: 0x{:x}", injectedAddresses[pattern]);
+    //     // Validate that the cached address is still valid
+    //     uintptr_t cachedPtr = injectedAddresses[pattern];
+    //     uintptr_t testValue;
+    //     if (ReadPtr(cachedPtr, testValue)) {
+    //         return cachedPtr;
+    //     } else {
+    //         spdlog::warn("Cached address 0x{:x} is no longer valid, re-scanning...", cachedPtr);
+    //         injectedAddresses.erase(pattern); // Remove invalid cache entry
+    //     }
+    // }
+    if (dllInjected) {
+        spdlog::info("DLL already injected, waiting for shared memory...");
+        bool connected = false;
+        for (int i = 0; i < 20; i++) {
+            if (sharedMem.OpenShared()) {
+                spdlog::info("Connected to shared memory!");
+                connected = true;
+                break;
+            }
+            Sleep(500);
+        }
+        if (!connected) {
+            spdlog::error("Error: Failed to connect to shared memory");
+            return 0;
+        }
+        return (uintptr_t)sharedMem.data->npcPointer;
+    }
     std::vector<bool> wildcards = ParseWildcards(pattern);
     uintptr_t instructionAddress = AOBScan(pattern, wildcards);
     if (instructionAddress == 0) {
@@ -227,29 +257,37 @@ uintptr_t ProcessMemory::FindPtrFromDll(const std::string &pattern) {
         return 0;
     }
 
+    // 4. Calculate function address
+    uintptr_t callAddr = instructionAddress - 5;
+    int32_t relativeOffset;
+    ReadProcessMemory(processHandle, (void *)(callAddr + 1), &relativeOffset, sizeof(int32_t),
+                      nullptr);
+    uintptr_t functionAddr = instructionAddress + relativeOffset;
+
+    spdlog::info("Target function at: 0x{:x}", functionAddr);
+
     // 2. Get DLL path (must be absolute!)
     std::filesystem::path dllPath = std::filesystem::current_path() / "hook.dll";
     if (!std::filesystem::exists(dllPath)) {
-        std::cerr << "Error: hook.dll not found at: " << dllPath << std::endl;
+        spdlog::error("Error: hook.dll not found at: {}", dllPath.string().c_str());
         return 1;
     }
-    std::cout << "DLL path: " << dllPath << std::endl;
+    spdlog::info("DLL path: {}", dllPath.string().c_str());
 
     // 3. Inject DLL
-    std::cout << "Injecting DLL..." << std::endl;
+    spdlog::info("Injecting DLL...");
     if (!InjectDLL(processId, dllPath.string().c_str())) {
-        std::cerr << "Error: Failed to inject DLL!" << std::endl;
+        spdlog::error("Error: Failed to inject DLL!");
         return 1;
     }
-    std::cout << "DLL injected successfully!" << std::endl;
+    spdlog::info("DLL injected successfully!");
 
     // 4. Wait for shared memory
-    SharedMemory sharedMem;
-    std::cout << "Waiting for shared memory..." << std::endl;
+    spdlog::info("Waiting for shared memory...");
     bool connected = false;
     for (int i = 0; i < 20; i++) {
         if (sharedMem.OpenShared()) {
-            std::cout << "Connected to shared memory!" << std::endl;
+            spdlog::info("Connected to shared memory!");
             connected = true;
             break;
         }
@@ -257,34 +295,48 @@ uintptr_t ProcessMemory::FindPtrFromDll(const std::string &pattern) {
     }
 
     if (!connected) {
-        std::cerr << "Error: Failed to connect to shared memory" << std::endl;
+        spdlog::error("Error: Failed to connect to shared memory");
         return 1;
     }
 
+    // 8. Pass the hook address to DLL
+    spdlog::info("Passing hook address to DLL: 0x{:x}", functionAddr);
+    sharedMem.data->hookAddress = functionAddr;
+    sharedMem.data->hookReady = true;
+
+    // 9. Wait for DLL to install hook (check for success message box or wait a bit)
+    spdlog::info("Waiting for DLL to install hook...");
+    Sleep(3000); // Give DLL time to install hook
+
     // 6. Monitor NPC pointer
-    uintptr_t ptrAddress;
-    std::cout << "\nMonitoring NPC pointer... (target an enemy in game)\n" << std::endl;
+    spdlog::info("Monitoring NPC pointer... (target an enemy in game)");
     while (true) {
         if (sharedMem.data->npcPointer) {
-            std::cout << "NPC Pointer: 0x" << std::hex << (uintptr_t)sharedMem.data->npcPointer
-                      << std::dec << std::endl;
+            spdlog::info("NPC Pointer: 0x{:x}", (uintptr_t)sharedMem.data->npcPointer);
 
             spdlog::info("Pointer found at: 0x{:x}", sharedMem.data->npcPointer);
-            uintptr_t attributeAddress = ResolvePointerChain(
-                (uintptr_t)sharedMem.data->npcPointer, processAttributes["NpcHp"].AttributeOffsets);
-            spdlog::info("NpcId found at: 0x{:x}", attributeAddress);
-            int32_t npcId;
-            if (!ReadInt(attributeAddress, npcId)) {
-                spdlog::error("Failed to read NpcId at 0x{:x}", attributeAddress);
-            }
-            spdlog::info("NpcId value: {}", npcId);
+
+            // injectedAddresses[pattern] = (uintptr_t)sharedMem.data->npcPointer;
+            // spdlog::info("Cached address: 0x{:x}, pattern: {}", injectedAddresses[pattern],
+            //              pattern);
+            dllInjected = true;
+            return (uintptr_t)sharedMem.data->npcPointer;
+            // uintptr_t attributeAddress = ResolvePointerChain(
+            //     (uintptr_t)sharedMem.data->npcPointer,
+            //     processAttributes["NpcHp"].AttributeOffsets);
+            // spdlog::info("NpcId found at: 0x{:x}", attributeAddress);
+            // int32_t npcId;
+            // if (!ReadInt(attributeAddress, npcId)) {
+            //     spdlog::error("Failed to read NpcId at 0x{:x}", attributeAddress);
+            // }
+            // spdlog::info("NpcId value: {}", npcId);
         } else {
-            std::cout << "No target" << std::endl;
+            spdlog::info("No target");
         }
 
         Sleep(1000);
     }
-    return ptrAddress;
+    return 0;
 }
 
 bool ProcessMemory::ReadPtr(uintptr_t address, uintptr_t &value) {
