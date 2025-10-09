@@ -19,6 +19,8 @@ using siphon_service::GetSiphonRequest;
 using siphon_service::GetSiphonResponse;
 using siphon_service::InputKeyRequest;
 using siphon_service::InputKeyResponse;
+using siphon_service::MoveMouseRequest;
+using siphon_service::MoveMouseResponse;
 using siphon_service::SetSiphonRequest;
 using siphon_service::SetSiphonResponse;
 using siphon_service::SiphonService;
@@ -89,6 +91,10 @@ class SiphonClient {
                       << " (array)" << std::endl;
             break;
 
+        case GetSiphonResponse::kBoolValue:
+            std::cout << attributeName << " = " << response.bool_value() << " (bool)" << std::endl;
+            break;
+
         case GetSiphonResponse::VALUE_NOT_SET:
             std::cout << "No value returned from server" << std::endl;
             return false;
@@ -130,6 +136,9 @@ class SiphonClient {
                 return false;
             }
             request.set_array_value(bytes.data(), bytes.size());
+        } else if (valueType == "bool") {
+            bool flag = (bool)std::stoi(valueStr);
+            request.set_bool_value(flag);
         } else {
             std::cout << "Unknown value type: " << valueType << std::endl;
             return false;
@@ -201,6 +210,22 @@ class SiphonClient {
         return result;
     }
 
+    bool MoveMouse(const int32_t &deltaX, const int32_t &deltaY, const int32_t &steps) {
+        MoveMouseRequest request;
+        MoveMouseResponse response;
+        ClientContext context;
+        request.set_delta_x(deltaX);
+        request.set_delta_y(deltaY);
+        request.set_steps(steps);
+        Status status = stub_->MoveMouse(&context, request, &response);
+        if (status.ok()) {
+            return response.success();
+        } else {
+            std::cout << "MoveMouse RPC failed: " << status.error_message() << std::endl;
+            return false;
+        }
+    }
+
   private:
     std::unique_ptr<SiphonService::Stub> stub_;
 };
@@ -255,6 +280,7 @@ int main() {
     std::cout << "    Array example: set position array \"6D DE AD BE EF\"" << std::endl;
     std::cout << "  input <key1> <key2> <key3> <value>" << std::endl;
     std::cout << "  capture <filename>" << std::endl;
+    std::cout << "  move <deltaX> <deltaY> <steps>" << std::endl;
     std::cout << "  quit" << std::endl;
 
     std::string command;
@@ -343,7 +369,18 @@ int main() {
                 std::cin.clear();
                 std::cin.ignore(10000, '\n');
             }
-        } else {
+        } else if (command == "move") {
+            std::string deltaX, deltaY, steps;
+            if (std::cin >> deltaX >> deltaY >> steps) {
+                if (client.MoveMouse(std::stoi(deltaX), std::stoi(deltaY), std::stoi(steps))) {
+                    std::cout << "Mouse moved successfully" << std::endl;
+                } else {
+                    std::cout << "Failed to move mouse" << std::endl;
+                }
+            }
+        }
+
+        else {
             std::cout << "Unknown command. Type 'quit' to exit or see commands above." << std::endl;
         }
     }

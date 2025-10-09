@@ -519,8 +519,10 @@ bool ProcessMemory::WriteAttributeFloat(std::string attributeName, const float &
 }
 
 bool ProcessMemory::ExtractAttributeArray(std::string attributeName, std::vector<uint8_t> &value) {
-    if (processAttributes[attributeName].AttributeType != "array") {
-        spdlog::error("Attribute {} is not an array", attributeName);
+
+    if (processAttributes[attributeName].AttributeType != "array" &&
+        processAttributes[attributeName].AttributeType != "bool") {
+        spdlog::error("Attribute {} is not an array or bool", attributeName);
         return false;
     }
 
@@ -548,8 +550,9 @@ bool ProcessMemory::ExtractAttributeArray(std::string attributeName, std::vector
 
 bool ProcessMemory::WriteAttributeArray(std::string attributeName,
                                         const std::vector<uint8_t> &value) {
-    if (processAttributes[attributeName].AttributeType != "array") {
-        spdlog::error("Attribute {} is not an array", attributeName);
+    if (processAttributes[attributeName].AttributeType != "array" &&
+        processAttributes[attributeName].AttributeType != "bool") {
+        spdlog::error("Attribute {} is not an array or bool", attributeName);
         return false;
     }
     uintptr_t ptr;

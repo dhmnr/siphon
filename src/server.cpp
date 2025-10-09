@@ -21,6 +21,8 @@ using siphon_service::GetSiphonRequest;
 using siphon_service::GetSiphonResponse;
 using siphon_service::InputKeyRequest;
 using siphon_service::InputKeyResponse;
+using siphon_service::MoveMouseRequest;
+using siphon_service::MoveMouseResponse;
 using siphon_service::SetSiphonRequest;
 using siphon_service::SetSiphonResponse;
 using siphon_service::SiphonService;
@@ -75,6 +77,14 @@ class SiphonServiceImpl final : public SiphonService::Service {
                 attributeValueStr =
                     "[array of " + std::to_string(attributeValue.size()) + " bytes]";
             }
+        } else if (attribute.AttributeType == "bool") {
+            std::vector<uint8_t> attributeValue(1);
+            success = memory_->ExtractAttributeArray(request->attributename(), attributeValue);
+            bool attributeValueBool = (bool)attributeValue[0];
+            if (success) {
+                response->set_bool_value(attributeValueBool);
+                attributeValueStr = std::to_string(attributeValueBool);
+            }
         }
 
         if (!success) {
@@ -114,6 +124,12 @@ class SiphonServiceImpl final : public SiphonService::Service {
         } else if (attribute.AttributeType == "array") {
             const auto &arrayValue = request->array_value();
             std::vector<uint8_t> vec(arrayValue.begin(), arrayValue.end());
+            success = memory_->WriteAttributeArray(request->attributename(), vec);
+        } else if (attribute.AttributeType == "bool") {
+
+            const auto &boolValue = request->bool_value();
+            std::vector<uint8_t> vec(1);
+            vec[0] = (uint8_t)boolValue;
             success = memory_->WriteAttributeArray(request->attributename(), vec);
         }
 
@@ -161,6 +177,15 @@ class SiphonServiceImpl final : public SiphonService::Service {
         response->set_success(true);
         response->set_message("Frame captured successfully");
 
+        return Status::OK;
+    }
+
+    Status MoveMouse(ServerContext *context, const MoveMouseRequest *request,
+                     MoveMouseResponse *response) override {
+        // TODO: Add error handling
+        input_->MoveMouseSmooth(request->delta_x(), request->delta_y(), request->steps());
+        response->set_success(true);
+        response->set_message("Mouse moved successfully");
         return Status::OK;
     }
 };

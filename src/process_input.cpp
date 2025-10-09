@@ -329,12 +329,13 @@ bool ProcessInput::MoveMouse(int deltaX, int deltaY) {
 
 // Smooth mouse movement (interpolated)
 bool ProcessInput::MoveMouseSmooth(int targetX, int targetY, int steps) {
+
     if (!context || mouse == 0)
         return false;
 
     int stepX = targetX / steps;
     int stepY = targetY / steps;
-
+    BringToFocus(processWindow);
     for (int i = 0; i < steps; i++) {
         MoveMouse(stepX, stepY);
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -346,6 +347,8 @@ bool ProcessInput::MoveMouseSmooth(int targetX, int targetY, int steps) {
 bool ProcessInput::ScrollWheel(int amount) {
     if (!context || mouse == 0)
         return false;
+
+    BringToFocus(processWindow);
 
     InterceptionMouseStroke stroke;
     stroke.state = INTERCEPTION_MOUSE_WHEEL; // 0x400

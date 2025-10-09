@@ -91,17 +91,15 @@ pattern = "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88"
 offsets = [0x10EF8, 0x0, 0x6D0]
 type = "int"
 
-[attributes.Gravity]
+[attributes.NoGravity]
 pattern = "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88" 
 offsets =  [0x10EF8, 0x0, 0x190, 0x68, 0x1D3]
-type = "array"
-length = 1
+type = "bool"
 
 [attributes.gameSpeedFlag]
 pattern = "48 8B 0D ?? ?? ?? ?? 80 BB ?? ?? ?? ?? 00 0F 84"
 offsets = [0x2D0]
-type = "array"
-length = 1
+type = "bool"
 
 [attributes.gameSpeedVal]
 pattern = "48 8B 0D ?? ?? ?? ?? 80 BB ?? ?? ?? ?? 00 0F 84"
