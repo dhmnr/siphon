@@ -14,6 +14,7 @@ class ProcessInput {
     HWND processWindow;
     InterceptionContext context;
     InterceptionDevice keyboard;
+    InterceptionDevice mouse;
 
   public:
     ProcessInput();
@@ -22,4 +23,10 @@ class ProcessInput {
     void PressKey(std::string key);
     void ReleaseKey(std::string key);
     bool TapKey(std::vector<std::string> keys, int holdMs = 100, int delayMs = 0);
+    void PressMouseButton(std::string button);
+    void ReleaseMouseButton(std::string button);
+    bool ClickMouseButton(std::string button, int delayMs = 0);
+    bool MoveMouse(int deltaX, int deltaY);
+    bool MoveMouseSmooth(int targetX, int targetY, int steps = 10);
+    bool ScrollWheel(int amount);
 };
