@@ -7,7 +7,6 @@
 #include <vector>
 #include <windows.h>
 
-
 #include "siphon_service.grpc.pb.h"
 #include <grpcpp/grpcpp.h>
 
@@ -147,13 +146,17 @@ class SiphonClient {
         return response.success();
     }
 
-    bool InputKey(const std::string &key, const std::string &value) {
+    bool InputKey(const std::vector<std::string> &keys, const std::string &holdMs,
+                  const std::string &delayMs) {
         InputKeyRequest request;
         InputKeyResponse response;
         ClientContext context;
 
-        request.set_key(key);
-        request.set_value(value);
+        for (const auto &key : keys) {
+            request.add_keys(key);
+        }
+        request.set_hold_ms(std::stoi(holdMs));
+        request.set_delay_ms(std::stoi(delayMs));
         Status status = stub_->InputKey(&context, request, &response);
 
         if (status.ok()) {
@@ -250,7 +253,7 @@ int main() {
     std::cout << "  set <attribute> <type> <value>" << std::endl;
     std::cout << "    Types: int, float, array" << std::endl;
     std::cout << "    Array example: set position array \"6D DE AD BE EF\"" << std::endl;
-    std::cout << "  input <key> <value>" << std::endl;
+    std::cout << "  input <key1> <key2> <key3> <value>" << std::endl;
     std::cout << "  capture <filename>" << std::endl;
     std::cout << "  quit" << std::endl;
 
@@ -291,14 +294,30 @@ int main() {
                 std::cin.ignore(10000, '\n');
             }
         } else if (command == "input") {
-            std::string key;
-            std::string value;
-            if (std::cin >> key >> value) {
-                if (client.InputKey(key, value)) {
-                    std::cout << "Key " << key << " inputted successfully" << std::endl;
+            std::string keysStr, holdMs, delayMs;
+
+            if (std::cin >> keysStr >> holdMs >> delayMs) {
+                // Parse space-separated keys
+                std::vector<std::string> keys;
+                std::stringstream ss(keysStr);
+                std::string key;
+                while (std::getline(ss, key, ',')) {
+                    if (!key.empty()) {
+                        keys.push_back(key);
+                    }
+                }
+
+                if (client.InputKey(keys, holdMs, delayMs)) {
+                    std::cout << "Keys ";
+                    for (size_t i = 0; i < keys.size(); ++i) {
+                        std::cout << keys[i];
+                        if (i < keys.size() - 1)
+                            std::cout << ",";
+                    }
+                    std::cout << " inputted successfully" << std::endl;
                 }
             } else {
-                std::cout << "Invalid input. Use: input <key> <value>" << std::endl;
+                std::cout << "Invalid input. Use: input <keys> <value>" << std::endl;
                 std::cin.clear();
                 std::cin.ignore(10000, '\n');
             }

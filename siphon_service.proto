@@ -55,8 +55,10 @@ message SetSiphonResponse {
 
 // Request message for inputting a key
 message InputKeyRequest {
-  string key = 1;
-  string value = 2;
+  repeated string keys = 1;
+  int32 hold_ms = 2;
+  int32 delay_ms = 3;
+
 }
 
 // Response message for inputting a key

@@ -134,7 +134,11 @@ class SiphonServiceImpl final : public SiphonService::Service {
                     InputKeyResponse *response) override {
         // TODO: Add error handling
         if (input_ != 0) {
-            input_->TapKey(request->key(), std::stoi(request->value()));
+            // Convert protobuf repeated field to std::vector
+            std::vector<std::string> keys(request->keys().begin(), request->keys().end());
+            input_->TapKey(keys, request->hold_ms(), request->delay_ms());
+            response->set_success(true);
+            response->set_message("Key tapped successfully");
         } else {
             spdlog::error("Input not initialized");
             response->set_success(false);

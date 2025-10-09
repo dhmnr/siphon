@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <map>
 #include <string>
+#include <vector>
 #include <windows.h>
 
 extern std::map<std::string, unsigned short> scancodeMap;
@@ -20,5 +21,5 @@ class ProcessInput {
     bool Initialize(HWND processWindow);
     void PressKey(std::string key);
     void ReleaseKey(std::string key);
-    bool TapKey(std::string key, int holdMs = 5000);
+    bool TapKey(std::vector<std::string> keys, int holdMs = 100, int delayMs = 0);
 };
