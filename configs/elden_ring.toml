@@ -52,12 +52,12 @@ pattern = "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88"
 offsets = [0x10EF8, 0x0, 0x190, 0x68, 0x70]
 type = "float"
 
-[attributes.HeroLocalPosY]
+[attributes.HeroLocalPosZ]
 pattern = "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88" 
 offsets = [0x10EF8, 0x0, 0x190, 0x68, 0x74]
 type = "float"
 
-[attributes.HeroLocalPosZ]
+[attributes.HeroLocalPosY]
 pattern = "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88" 
 offsets = [0x10EF8, 0x0, 0x190, 0x68, 0x78]
 type = "float"
@@ -68,13 +68,13 @@ offsets = [0x10EF8, 0x0, 0x6C0]
 type = "float"
 
 
-[attributes.HeroGlobalPosY]
+[attributes.HeroGlobalPosZ]
 pattern = "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88" 
 offsets = [0x10EF8, 0x0, 0x6C4]
 type = "float"
 
 
-[attributes.HeroGlobalPosZ]
+[attributes.HeroGlobalPosY]
 pattern = "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88" 
 offsets = [0x10EF8, 0x0, 0x6C8]
 type = "float"
@@ -116,6 +116,12 @@ type = "int"
 method = "dll"
 pattern = "48 8B 48 08 49 89 8D"
 offsets = [0x190, 0x0, 0x138]
+type = "int"
+
+[attributes.NpcMaxHp]
+method = "dll"
+pattern = "48 8B 48 08 49 89 8D"
+offsets = [0x190, 0x0, 0x13C]
 type = "int"
 
 [attributes.NpcGlobalPosX]

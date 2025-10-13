@@ -17,8 +17,10 @@ using siphon_service::CaptureFrameRequest;
 using siphon_service::CaptureFrameResponse;
 using siphon_service::GetSiphonRequest;
 using siphon_service::GetSiphonResponse;
-using siphon_service::InputKeyRequest;
-using siphon_service::InputKeyResponse;
+using siphon_service::InputKeyTapRequest;
+using siphon_service::InputKeyTapResponse;
+using siphon_service::InputKeyToggleRequest;
+using siphon_service::InputKeyToggleResponse;
 using siphon_service::MoveMouseRequest;
 using siphon_service::MoveMouseResponse;
 using siphon_service::SetSiphonRequest;
@@ -155,10 +157,10 @@ class SiphonClient {
         return response.success();
     }
 
-    bool InputKey(const std::vector<std::string> &keys, const std::string &holdMs,
-                  const std::string &delayMs) {
-        InputKeyRequest request;
-        InputKeyResponse response;
+    bool InputKeyTap(const std::vector<std::string> &keys, const std::string &holdMs,
+                     const std::string &delayMs) {
+        InputKeyTapRequest request;
+        InputKeyTapResponse response;
         ClientContext context;
 
         for (const auto &key : keys) {
@@ -166,12 +168,28 @@ class SiphonClient {
         }
         request.set_hold_ms(std::stoi(holdMs));
         request.set_delay_ms(std::stoi(delayMs));
-        Status status = stub_->InputKey(&context, request, &response);
+        Status status = stub_->InputKeyTap(&context, request, &response);
 
         if (status.ok()) {
             return response.success();
         } else {
-            std::cout << "InputKey RPC failed: " << status.error_message() << std::endl;
+            std::cout << "InputKeyTap RPC failed: " << status.error_message() << std::endl;
+            return false;
+        }
+    }
+
+    bool InputKeyToggle(const std::string &key, const bool &toggle) {
+
+        InputKeyToggleRequest request;
+        InputKeyToggleResponse response;
+        ClientContext context;
+        request.set_key(key);
+        request.set_toggle(toggle);
+        Status status = stub_->InputKeyToggle(&context, request, &response);
+        if (status.ok()) {
+            return response.success();
+        } else {
+            std::cout << "InputKeyToggle RPC failed: " << status.error_message() << std::endl;
             return false;
         }
     }
@@ -279,6 +297,7 @@ int main() {
     std::cout << "    Types: int, float, array" << std::endl;
     std::cout << "    Array example: set position array \"6D DE AD BE EF\"" << std::endl;
     std::cout << "  input <key1> <key2> <key3> <value>" << std::endl;
+    std::cout << "  toggle <key> <toggle>" << std::endl;
     std::cout << "  capture <filename>" << std::endl;
     std::cout << "  move <deltaX> <deltaY> <steps>" << std::endl;
     std::cout << "  quit" << std::endl;
@@ -333,7 +352,7 @@ int main() {
                     }
                 }
 
-                if (client.InputKey(keys, holdMs, delayMs)) {
+                if (client.InputKeyTap(keys, holdMs, delayMs)) {
                     std::cout << "Keys ";
                     for (size_t i = 0; i < keys.size(); ++i) {
                         std::cout << keys[i];
@@ -380,7 +399,22 @@ int main() {
             }
         }
 
-        else {
+        else if (command == "toggle") {
+            std::string key;
+            bool toggle = false;
+            if (std::cin >> key >> toggle) {
+                if (client.InputKeyToggle(key, toggle)) {
+                    std::cout << "Key " << key << " " << (toggle ? "pressed" : "released")
+                              << " successfully" << std::endl;
+                } else {
+                    std::cout << "Failed to toggle key" << std::endl;
+                }
+            } else {
+                std::cout << "Invalid input. Use: toggle <key> <toggle>" << std::endl;
+                std::cin.clear();
+                std::cin.ignore(10000, '\n');
+            }
+        } else {
             std::cout << "Unknown command. Type 'quit' to exit or see commands above." << std::endl;
         }
     }

@@ -194,7 +194,7 @@ void ProcessInput::PressKey(std::string key) {
 
     // Convert key to uppercase
     std::transform(key.begin(), key.end(), key.begin(), ::toupper);
-
+    BringToFocus(processWindow);
     InterceptionKeyStroke stroke;
     stroke.code = scancodeMap[key];
     stroke.state = INTERCEPTION_KEY_DOWN;
@@ -209,7 +209,7 @@ void ProcessInput::ReleaseKey(std::string key) {
 
     // Convert key to uppercase
     std::transform(key.begin(), key.end(), key.begin(), ::toupper);
-
+    BringToFocus(processWindow);
     InterceptionKeyStroke stroke;
     stroke.code = scancodeMap[key];
     stroke.state = INTERCEPTION_KEY_UP;

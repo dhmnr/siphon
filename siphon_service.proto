@@ -11,7 +11,8 @@ service SiphonService {
   rpc SetAttribute(SetSiphonRequest) returns (SetSiphonResponse);
 
   // Input a key
-  rpc InputKey(InputKeyRequest) returns (InputKeyResponse);
+  rpc InputKeyTap(InputKeyTapRequest) returns (InputKeyTapResponse);
+  rpc InputKeyToggle(InputKeyToggleRequest) returns (InputKeyToggleResponse);
 
   // Move mouse
   rpc MoveMouse(MoveMouseRequest) returns (MoveMouseResponse);
@@ -59,18 +60,28 @@ message SetSiphonResponse {
 }
 
 // Request message for inputting a key
-message InputKeyRequest {
+message InputKeyTapRequest {
   repeated string keys = 1;
   int32 hold_ms = 2;
   int32 delay_ms = 3;
-
 }
 
 // Response message for inputting a key
-message InputKeyResponse {
+message InputKeyTapResponse {
   bool success = 1;
   string message = 2;
 }
+
+message InputKeyToggleRequest {
+  string key = 1;
+  bool toggle = 2;
+}
+
+message InputKeyToggleResponse {
+  bool success = 1;
+  string message = 2;
+}
+
 
 // Request message for moving mouse
 message MoveMouseRequest {

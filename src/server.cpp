@@ -19,8 +19,10 @@ using siphon_service::CaptureFrameRequest;
 using siphon_service::CaptureFrameResponse;
 using siphon_service::GetSiphonRequest;
 using siphon_service::GetSiphonResponse;
-using siphon_service::InputKeyRequest;
-using siphon_service::InputKeyResponse;
+using siphon_service::InputKeyTapRequest;
+using siphon_service::InputKeyTapResponse;
+using siphon_service::InputKeyToggleRequest;
+using siphon_service::InputKeyToggleResponse;
 using siphon_service::MoveMouseRequest;
 using siphon_service::MoveMouseResponse;
 using siphon_service::SetSiphonRequest;
@@ -146,8 +148,8 @@ class SiphonServiceImpl final : public SiphonService::Service {
         return Status::OK;
     }
 
-    Status InputKey(ServerContext *context, const InputKeyRequest *request,
-                    InputKeyResponse *response) override {
+    Status InputKeyTap(ServerContext *context, const InputKeyTapRequest *request,
+                       InputKeyTapResponse *response) override {
         // TODO: Add error handling
         if (input_ != 0) {
             // Convert protobuf repeated field to std::vector
@@ -155,6 +157,26 @@ class SiphonServiceImpl final : public SiphonService::Service {
             input_->TapKey(keys, request->hold_ms(), request->delay_ms());
             response->set_success(true);
             response->set_message("Key tapped successfully");
+        } else {
+            spdlog::error("Input not initialized");
+            response->set_success(false);
+            response->set_message("Input not initialized");
+            return Status::OK;
+        }
+        return Status::OK;
+    }
+
+    Status InputKeyToggle(ServerContext *context, const InputKeyToggleRequest *request,
+                          InputKeyToggleResponse *response) override {
+        // TODO: Add error handling
+        if (input_ != 0) {
+            if (request->toggle()) {
+                input_->PressKey(request->key());
+            } else {
+                input_->ReleaseKey(request->key());
+            }
+            response->set_success(true);
+            response->set_message("Key pressed/released successfully");
         } else {
             spdlog::error("Input not initialized");
             response->set_success(false);
