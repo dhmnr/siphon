@@ -1,6 +1,10 @@
+#include <array>
+#include <chrono>
+#include <cstdio>
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 
@@ -17,6 +21,8 @@ using grpc::ServerContext;
 using grpc::Status;
 using siphon_service::CaptureFrameRequest;
 using siphon_service::CaptureFrameResponse;
+using siphon_service::ExecuteCommandRequest;
+using siphon_service::ExecuteCommandResponse;
 using siphon_service::GetSiphonRequest;
 using siphon_service::GetSiphonResponse;
 using siphon_service::InputKeyTapRequest;
@@ -208,6 +214,98 @@ class SiphonServiceImpl final : public SiphonService::Service {
         input_->MoveMouseSmooth(request->delta_x(), request->delta_y(), request->steps());
         response->set_success(true);
         response->set_message("Mouse moved successfully");
+        return Status::OK;
+    }
+
+    Status ExecuteCommand(ServerContext *context, const ExecuteCommandRequest *request,
+                          ExecuteCommandResponse *response) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        auto start_time = std::chrono::high_resolution_clock::now();
+
+        // Build the command string
+        std::string full_command = request->command();
+        for (const auto &arg : request->args()) {
+            full_command += " \"" + arg + "\"";
+        }
+
+        spdlog::info("Executing command: {}", full_command);
+
+        try {
+            // Set working directory if specified
+            std::string original_dir;
+            if (!request->working_directory().empty()) {
+                char buffer[MAX_PATH];
+                if (GetCurrentDirectoryA(MAX_PATH, buffer)) {
+                    original_dir = buffer;
+                }
+                if (!SetCurrentDirectoryA(request->working_directory().c_str())) {
+                    spdlog::error("Failed to set working directory to: {}",
+                                  request->working_directory());
+                    response->set_success(false);
+                    response->set_message("Failed to set working directory");
+                    response->set_exit_code(-1);
+                    return Status::OK;
+                }
+            }
+
+            std::string stdout_output, stderr_output;
+            int exit_code = 0;
+
+            if (request->capture_output()) {
+                // Execute command and capture output
+                std::array<char, 128> buffer;
+                std::string result;
+
+                // Use popen to execute command and capture output
+                std::unique_ptr<FILE, decltype(&_pclose)> pipe(_popen(full_command.c_str(), "r"),
+                                                               _pclose);
+                if (!pipe) {
+                    response->set_success(false);
+                    response->set_message("Failed to execute command");
+                    response->set_exit_code(-1);
+                } else {
+                    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
+                        result += buffer.data();
+                    }
+                    exit_code = _pclose(pipe.release());
+                    stdout_output = result;
+
+                    response->set_success(exit_code == 0);
+                    response->set_exit_code(exit_code);
+                    response->set_stdout_output(stdout_output);
+                    response->set_message(exit_code == 0 ? "Command executed successfully"
+                                                         : "Command failed");
+                }
+            } else {
+                // Execute command without capturing output
+                exit_code = system(full_command.c_str());
+                response->set_success(exit_code == 0);
+                response->set_exit_code(exit_code);
+                response->set_message(exit_code == 0 ? "Command executed successfully"
+                                                     : "Command failed");
+            }
+
+            // Restore original working directory
+            if (!original_dir.empty()) {
+                SetCurrentDirectoryA(original_dir.c_str());
+            }
+
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration =
+                std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+            response->set_execution_time_ms(static_cast<int32_t>(duration.count()));
+
+            spdlog::info("Command completed with exit code: {} in {}ms", exit_code,
+                         duration.count());
+
+        } catch (const std::exception &e) {
+            spdlog::error("Exception during command execution: {}", e.what());
+            response->set_success(false);
+            response->set_message("Exception during command execution: " + std::string(e.what()));
+            response->set_exit_code(-1);
+        }
+
         return Status::OK;
     }
 };

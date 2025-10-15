@@ -15,6 +15,8 @@ using grpc::ClientContext;
 using grpc::Status;
 using siphon_service::CaptureFrameRequest;
 using siphon_service::CaptureFrameResponse;
+using siphon_service::ExecuteCommandRequest;
+using siphon_service::ExecuteCommandResponse;
 using siphon_service::GetSiphonRequest;
 using siphon_service::GetSiphonResponse;
 using siphon_service::InputKeyTapRequest;
@@ -244,6 +246,52 @@ class SiphonClient {
         }
     }
 
+    struct CommandResult {
+        bool success;
+        std::string message;
+        int32_t exit_code;
+        std::string stdout_output;
+        std::string stderr_output;
+        int32_t execution_time_ms;
+    };
+
+    CommandResult ExecuteCommand(const std::string &command,
+                                 const std::vector<std::string> &args = {},
+                                 const std::string &working_directory = "",
+                                 int32_t timeout_seconds = 30, bool capture_output = true) {
+        ExecuteCommandRequest request;
+        ExecuteCommandResponse response;
+        ClientContext context;
+
+        request.set_command(command);
+        for (const auto &arg : args) {
+            request.add_args(arg);
+        }
+        request.set_working_directory(working_directory);
+        request.set_timeout_seconds(timeout_seconds);
+        request.set_capture_output(capture_output);
+
+        Status status = stub_->ExecuteCommand(&context, request, &response);
+
+        CommandResult result;
+        if (status.ok()) {
+            result.success = response.success();
+            result.message = response.message();
+            result.exit_code = response.exit_code();
+            result.stdout_output = response.stdout_output();
+            result.stderr_output = response.stderr_output();
+            result.execution_time_ms = response.execution_time_ms();
+        } else {
+            std::cout << "ExecuteCommand RPC failed: " << status.error_message() << std::endl;
+            result.success = false;
+            result.message = "RPC failed: " + status.error_message();
+            result.exit_code = -1;
+            result.execution_time_ms = 0;
+        }
+
+        return result;
+    }
+
   private:
     std::unique_ptr<SiphonService::Stub> stub_;
 };
@@ -300,6 +348,9 @@ int main() {
     std::cout << "  toggle <key> <toggle>" << std::endl;
     std::cout << "  capture <filename>" << std::endl;
     std::cout << "  move <deltaX> <deltaY> <steps>" << std::endl;
+    std::cout
+        << "  exec <command> [args...] [--dir <working_dir>] [--timeout <seconds>] [--no-capture]"
+        << std::endl;
     std::cout << "  quit" << std::endl;
 
     std::string command;
@@ -413,6 +464,66 @@ int main() {
                 std::cout << "Invalid input. Use: toggle <key> <toggle>" << std::endl;
                 std::cin.clear();
                 std::cin.ignore(10000, '\n');
+            }
+        } else if (command == "exec") {
+            std::string line;
+            std::cin.ignore(); // Ignore whitespace before getline
+            std::getline(std::cin, line);
+
+            // Parse command line arguments
+            std::vector<std::string> tokens;
+            std::istringstream iss(line);
+            std::string token;
+            while (iss >> token) {
+                tokens.push_back(token);
+            }
+
+            if (tokens.empty()) {
+                std::cout << "Invalid input. Use: exec <command> [args...]" << std::endl;
+                continue;
+            }
+
+            std::string cmd = tokens[0];
+            std::vector<std::string> args;
+            std::string working_dir = "";
+            int32_t timeout = 30;
+            bool capture_output = true;
+
+            // Parse arguments and options
+            for (size_t i = 1; i < tokens.size(); ++i) {
+                if (tokens[i] == "--dir" && i + 1 < tokens.size()) {
+                    working_dir = tokens[++i];
+                } else if (tokens[i] == "--timeout" && i + 1 < tokens.size()) {
+                    timeout = std::stoi(tokens[++i]);
+                } else if (tokens[i] == "--no-capture") {
+                    capture_output = false;
+                } else {
+                    args.push_back(tokens[i]);
+                }
+            }
+
+            std::cout << "Executing command: " << cmd;
+            for (const auto &arg : args) {
+                std::cout << " " << arg;
+            }
+            std::cout << std::endl;
+
+            auto result = client.ExecuteCommand(cmd, args, working_dir, timeout, capture_output);
+
+            std::cout << "Command completed:" << std::endl;
+            std::cout << "  Success: " << (result.success ? "true" : "false") << std::endl;
+            std::cout << "  Exit Code: " << result.exit_code << std::endl;
+            std::cout << "  Execution Time: " << result.execution_time_ms << "ms" << std::endl;
+            std::cout << "  Message: " << result.message << std::endl;
+
+            if (!result.stdout_output.empty()) {
+                std::cout << "  Output:" << std::endl;
+                std::cout << result.stdout_output << std::endl;
+            }
+
+            if (!result.stderr_output.empty()) {
+                std::cout << "  Error Output:" << std::endl;
+                std::cout << result.stderr_output << std::endl;
             }
         } else {
             std::cout << "Unknown command. Type 'quit' to exit or see commands above." << std::endl;
