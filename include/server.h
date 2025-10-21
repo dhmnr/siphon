@@ -6,4 +6,5 @@
 #include <cstdint>
 #include <windows.h>
 
-void RunServer(ProcessMemory *memory, ProcessInput *input, ProcessCapture *capture);
+// New server API - starts without pre-initialized components
+void RunServer();

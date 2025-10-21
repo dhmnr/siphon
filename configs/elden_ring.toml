@@ -2,8 +2,6 @@
 name = "eldenring.exe"
 window_name = "ELDEN RING"
 
-[post_launch_process]
-
 [attributes.HeroHp]
 pattern = "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88" 
 offsets = [0x10EF8, 0x0, 0x190, 0x0, 0x138]

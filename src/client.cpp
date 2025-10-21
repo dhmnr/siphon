@@ -1,14 +1,18 @@
 #include <cstdio>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 #include <windows.h>
 
 #include "siphon_service.grpc.pb.h"
 #include <grpcpp/grpcpp.h>
+#include <toml++/toml.h>
 
 using grpc::Channel;
 using grpc::ClientContext;
@@ -17,17 +21,117 @@ using siphon_service::CaptureFrameRequest;
 using siphon_service::CaptureFrameResponse;
 using siphon_service::ExecuteCommandRequest;
 using siphon_service::ExecuteCommandResponse;
+using siphon_service::GetServerStatusRequest;
+using siphon_service::GetServerStatusResponse;
 using siphon_service::GetSiphonRequest;
 using siphon_service::GetSiphonResponse;
+using siphon_service::InitializeCaptureRequest;
+using siphon_service::InitializeCaptureResponse;
+using siphon_service::InitializeInputRequest;
+using siphon_service::InitializeInputResponse;
+using siphon_service::InitializeMemoryRequest;
+using siphon_service::InitializeMemoryResponse;
 using siphon_service::InputKeyTapRequest;
 using siphon_service::InputKeyTapResponse;
 using siphon_service::InputKeyToggleRequest;
 using siphon_service::InputKeyToggleResponse;
 using siphon_service::MoveMouseRequest;
 using siphon_service::MoveMouseResponse;
+using siphon_service::ProcessAttributeProto;
+using siphon_service::SetProcessConfigRequest;
+using siphon_service::SetProcessConfigResponse;
 using siphon_service::SetSiphonRequest;
 using siphon_service::SetSiphonResponse;
 using siphon_service::SiphonService;
+
+// Helper function to parse TOML config and build protobuf request
+bool ParseConfigFile(const std::string &filepath, std::string &processName,
+                     std::string &processWindowName,
+                     siphon_service::SetProcessConfigRequest &request) {
+    try {
+        // Parse TOML file
+        auto config = toml::parse_file(filepath);
+
+        // Get process info
+        auto processInfo = config["process_info"];
+        if (!processInfo) {
+            std::cerr << "Missing [process_info] section in config" << std::endl;
+            return false;
+        }
+
+        processName = processInfo["name"].value_or("");
+        processWindowName = processInfo["window_name"].value_or("");
+
+        if (processName.empty()) {
+            std::cerr << "Missing 'name' in [process_info]" << std::endl;
+            return false;
+        }
+
+        request.set_process_name(processName);
+        request.set_process_window_name(processWindowName);
+
+        // Get attributes
+        auto attributes = config["attributes"];
+        if (!attributes) {
+            std::cerr << "Missing [attributes] section in config" << std::endl;
+            return false;
+        }
+
+        // Parse each attribute
+        for (auto &&[name, attr] : *attributes.as_table()) {
+            // Each attr is a toml::node, convert to table
+            auto attrTable = attr.as_table();
+            if (!attrTable) {
+                continue; // Skip if not a table
+            }
+
+            auto *protoAttr = request.add_attributes();
+            protoAttr->set_name(std::string(name));
+
+            // Get pattern
+            if (auto pattern = (*attrTable)["pattern"].value<std::string>()) {
+                protoAttr->set_pattern(*pattern);
+            }
+
+            // Get offsets
+            if (auto offsetsArray = (*attrTable)["offsets"].as_array()) {
+                for (auto &&offset : *offsetsArray) {
+                    if (auto val = offset.value<int64_t>()) {
+                        protoAttr->add_offsets(static_cast<uint64_t>(*val));
+                    }
+                }
+            }
+
+            // Get type
+            if (auto type = (*attrTable)["type"].value<std::string>()) {
+                protoAttr->set_type(*type);
+            }
+
+            // Get length (optional, default to 0)
+            if (auto length = (*attrTable)["length"].value<int64_t>()) {
+                protoAttr->set_length(static_cast<uint64_t>(*length));
+            } else {
+                protoAttr->set_length(0);
+            }
+
+            // Get method (optional, default to empty)
+            if (auto method = (*attrTable)["method"].value<std::string>()) {
+                protoAttr->set_method(*method);
+            } else {
+                protoAttr->set_method("");
+            }
+        }
+
+        return true;
+
+    } catch (const toml::parse_error &err) {
+        std::cerr << "TOML parse error: " << err.description() << std::endl;
+        return false;
+    } catch (const std::exception &e) {
+        std::cerr << "Error parsing config: " << e.what() << std::endl;
+        return false;
+    }
+}
 
 // Helper function to convert hex string to bytes
 std::vector<uint8_t> HexStringToBytes(const std::string &hex) {
@@ -292,6 +396,123 @@ class SiphonClient {
         return result;
     }
 
+    bool SetProcessConfig(const SetProcessConfigRequest &request) {
+        SetProcessConfigResponse response;
+        ClientContext context;
+
+        Status status = stub_->SetProcessConfig(&context, request, &response);
+
+        if (!status.ok()) {
+            std::cout << "SetProcessConfig RPC failed: " << status.error_message() << std::endl;
+            return false;
+        }
+
+        std::cout << "Server response: " << response.message() << std::endl;
+        return response.success();
+    }
+
+    bool InitializeMemory() {
+        InitializeMemoryRequest request;
+        InitializeMemoryResponse response;
+        ClientContext context;
+
+        Status status = stub_->InitializeMemory(&context, request, &response);
+
+        if (!status.ok()) {
+            std::cout << "InitializeMemory RPC failed: " << status.error_message() << std::endl;
+            return false;
+        }
+
+        std::cout << "Server response: " << response.message() << std::endl;
+        if (response.success()) {
+            std::cout << "Process ID: " << response.process_id() << std::endl;
+        }
+        return response.success();
+    }
+
+    bool InitializeInput(const std::string &windowName = "") {
+        InitializeInputRequest request;
+        InitializeInputResponse response;
+        ClientContext context;
+
+        if (!windowName.empty()) {
+            request.set_window_name(windowName);
+        }
+
+        Status status = stub_->InitializeInput(&context, request, &response);
+
+        if (!status.ok()) {
+            std::cout << "InitializeInput RPC failed: " << status.error_message() << std::endl;
+            return false;
+        }
+
+        std::cout << "Server response: " << response.message() << std::endl;
+        return response.success();
+    }
+
+    bool InitializeCapture(const std::string &windowName = "") {
+        InitializeCaptureRequest request;
+        InitializeCaptureResponse response;
+        ClientContext context;
+
+        if (!windowName.empty()) {
+            request.set_window_name(windowName);
+        }
+
+        Status status = stub_->InitializeCapture(&context, request, &response);
+
+        if (!status.ok()) {
+            std::cout << "InitializeCapture RPC failed: " << status.error_message() << std::endl;
+            return false;
+        }
+
+        std::cout << "Server response: " << response.message() << std::endl;
+        if (response.success()) {
+            std::cout << "Window size: " << response.window_width() << "x"
+                      << response.window_height() << std::endl;
+        }
+        return response.success();
+    }
+
+    struct ServerStatus {
+        bool success;
+        std::string message;
+        bool config_set;
+        bool memory_initialized;
+        bool input_initialized;
+        bool capture_initialized;
+        std::string process_name;
+        std::string window_name;
+        int32_t process_id;
+    };
+
+    ServerStatus GetServerStatus() {
+        GetServerStatusRequest request;
+        GetServerStatusResponse response;
+        ClientContext context;
+
+        Status status = stub_->GetServerStatus(&context, request, &response);
+
+        ServerStatus result;
+        if (status.ok()) {
+            result.success = response.success();
+            result.message = response.message();
+            result.config_set = response.config_set();
+            result.memory_initialized = response.memory_initialized();
+            result.input_initialized = response.input_initialized();
+            result.capture_initialized = response.capture_initialized();
+            result.process_name = response.process_name();
+            result.window_name = response.window_name();
+            result.process_id = response.process_id();
+        } else {
+            std::cout << "GetServerStatus RPC failed: " << status.error_message() << std::endl;
+            result.success = false;
+            result.message = "RPC failed: " + status.error_message();
+        }
+
+        return result;
+    }
+
   private:
     std::unique_ptr<SiphonService::Stub> stub_;
 };
@@ -338,20 +559,25 @@ int main() {
     SiphonClient client(
         grpc::CreateCustomChannel(server_address, grpc::InsecureChannelCredentials(), args));
 
-    std::cout << "gRPC Siphon Client" << std::endl;
-    std::cout << "Commands:" << std::endl;
-    std::cout << "  get <attribute>" << std::endl;
-    std::cout << "  set <attribute> <type> <value>" << std::endl;
-    std::cout << "    Types: int, float, array" << std::endl;
-    std::cout << "    Array example: set position array \"6D DE AD BE EF\"" << std::endl;
-    std::cout << "  input <key1> <key2> <key3> <value>" << std::endl;
-    std::cout << "  toggle <key> <toggle>" << std::endl;
-    std::cout << "  capture <filename>" << std::endl;
-    std::cout << "  move <deltaX> <deltaY> <steps>" << std::endl;
-    std::cout
-        << "  exec <command> [args...] [--dir <working_dir>] [--timeout <seconds>] [--no-capture]"
-        << std::endl;
-    std::cout << "  quit" << std::endl;
+    std::cout << "gRPC Siphon Client v0.0.2" << std::endl;
+    std::cout << "\n=== Initialization Commands ===" << std::endl;
+    std::cout << "  init <config_file>        - Load config and initialize all components"
+              << std::endl;
+    std::cout << "  status                    - Show server initialization status" << std::endl;
+    std::cout << "  config <config_file>      - Load and send config to server" << std::endl;
+    std::cout << "  init-memory               - Initialize memory subsystem" << std::endl;
+    std::cout << "  init-input [window_name]  - Initialize input subsystem" << std::endl;
+    std::cout << "  init-capture [window_name]- Initialize capture subsystem" << std::endl;
+    std::cout << "\n=== Control Commands ===" << std::endl;
+    std::cout << "  get <attribute>           - Get attribute value" << std::endl;
+    std::cout << "  set <attribute> <type> <value> - Set attribute (int, float, array, bool)"
+              << std::endl;
+    std::cout << "  input <key1> <key2> <key3> <value> - Tap keys" << std::endl;
+    std::cout << "  toggle <key> <toggle>     - Press/release key" << std::endl;
+    std::cout << "  capture <filename>        - Capture frame to BMP file" << std::endl;
+    std::cout << "  move <deltaX> <deltaY> <steps> - Move mouse" << std::endl;
+    std::cout << "  exec <command> [args...]  - Execute command on server" << std::endl;
+    std::cout << "  quit                      - Exit client" << std::endl;
 
     std::string command;
     while (true) {
@@ -360,6 +586,147 @@ int main() {
 
         if (command == "quit" || command == "q") {
             break;
+        } else if (command == "init") {
+            std::string configFile;
+            if (std::cin >> configFile) {
+                std::cout << "Loading config from: " << configFile << std::endl;
+
+                // Parse TOML config directly into protobuf request
+                std::string processName, processWindowName;
+                SetProcessConfigRequest configRequest;
+
+                if (!ParseConfigFile(configFile, processName, processWindowName, configRequest)) {
+                    std::cout << "Failed to load config file: " << configFile << std::endl;
+                    std::cin.clear();
+                    std::cin.ignore(10000, '\n');
+                    continue;
+                }
+
+                std::cout << "Config loaded - Process: " << processName
+                          << ", Window: " << processWindowName
+                          << ", Attributes: " << configRequest.attributes_size() << std::endl;
+
+                // Send config to server
+                std::cout << "Sending configuration to server..." << std::endl;
+                if (!client.SetProcessConfig(configRequest)) {
+                    std::cout << "Failed to set process config" << std::endl;
+                    continue;
+                }
+
+                // Wait a moment for process to be running
+                std::cout << "Waiting for process to be ready..." << std::endl;
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+
+                // Initialize memory
+                std::cout << "Initializing memory subsystem..." << std::endl;
+                if (!client.InitializeMemory()) {
+                    std::cout << "Failed to initialize memory" << std::endl;
+                    continue;
+                }
+
+                // Initialize input
+                std::cout << "Initializing input subsystem..." << std::endl;
+                if (!client.InitializeInput()) {
+                    std::cout << "Failed to initialize input" << std::endl;
+                    continue;
+                }
+
+                // Initialize capture
+                std::cout << "Initializing capture subsystem..." << std::endl;
+                if (!client.InitializeCapture()) {
+                    std::cout << "Failed to initialize capture" << std::endl;
+                    continue;
+                }
+
+                std::cout << "\n=== Initialization Complete! ===" << std::endl;
+                std::cout << "All subsystems initialized successfully." << std::endl;
+
+            } else {
+                std::cout << "Invalid input. Use: init <config_file>" << std::endl;
+                std::cin.clear();
+                std::cin.ignore(10000, '\n');
+            }
+        } else if (command == "status") {
+            auto status = client.GetServerStatus();
+            if (status.success) {
+                std::cout << "\n=== Server Status ===" << std::endl;
+                std::cout << "Config Set:          " << (status.config_set ? "Yes" : "No")
+                          << std::endl;
+                std::cout << "Memory Initialized:  " << (status.memory_initialized ? "Yes" : "No")
+                          << std::endl;
+                std::cout << "Input Initialized:   " << (status.input_initialized ? "Yes" : "No")
+                          << std::endl;
+                std::cout << "Capture Initialized: " << (status.capture_initialized ? "Yes" : "No")
+                          << std::endl;
+                if (status.config_set) {
+                    std::cout << "Process Name:        " << status.process_name << std::endl;
+                    std::cout << "Window Name:         " << status.window_name << std::endl;
+                    if (status.process_id > 0) {
+                        std::cout << "Process ID:          " << status.process_id << std::endl;
+                    }
+                }
+                std::cout << "Message: " << status.message << std::endl;
+            } else {
+                std::cout << "Failed to get server status" << std::endl;
+            }
+        } else if (command == "config") {
+            std::string configFile;
+            if (std::cin >> configFile) {
+                std::cout << "Loading config from: " << configFile << std::endl;
+
+                std::string processName, processWindowName;
+                SetProcessConfigRequest configRequest;
+
+                if (!ParseConfigFile(configFile, processName, processWindowName, configRequest)) {
+                    std::cout << "Failed to load config file: " << configFile << std::endl;
+                    continue;
+                }
+
+                std::cout << "Config loaded - Process: " << processName
+                          << ", Window: " << processWindowName
+                          << ", Attributes: " << configRequest.attributes_size() << std::endl;
+
+                if (client.SetProcessConfig(configRequest)) {
+                    std::cout << "Configuration sent to server successfully" << std::endl;
+                } else {
+                    std::cout << "Failed to send configuration" << std::endl;
+                }
+            } else {
+                std::cout << "Invalid input. Use: config <config_file>" << std::endl;
+                std::cin.clear();
+                std::cin.ignore(10000, '\n');
+            }
+        } else if (command == "init-memory") {
+            std::cout << "Initializing memory subsystem..." << std::endl;
+            if (client.InitializeMemory()) {
+                std::cout << "Memory subsystem initialized successfully" << std::endl;
+            } else {
+                std::cout << "Failed to initialize memory subsystem" << std::endl;
+            }
+        } else if (command == "init-input") {
+            std::string windowName;
+            std::cin >> std::ws; // Skip whitespace
+            std::getline(std::cin, windowName);
+            windowName = windowName.empty() ? "" : windowName;
+
+            std::cout << "Initializing input subsystem..." << std::endl;
+            if (client.InitializeInput(windowName)) {
+                std::cout << "Input subsystem initialized successfully" << std::endl;
+            } else {
+                std::cout << "Failed to initialize input subsystem" << std::endl;
+            }
+        } else if (command == "init-capture") {
+            std::string windowName;
+            std::cin >> std::ws; // Skip whitespace
+            std::getline(std::cin, windowName);
+            windowName = windowName.empty() ? "" : windowName;
+
+            std::cout << "Initializing capture subsystem..." << std::endl;
+            if (client.InitializeCapture(windowName)) {
+                std::cout << "Capture subsystem initialized successfully" << std::endl;
+            } else {
+                std::cout << "Failed to initialize capture subsystem" << std::endl;
+            }
         } else if (command == "get") {
             std::string attributeName;
             if (std::cin >> attributeName) {
@@ -470,11 +837,43 @@ int main() {
             std::cin.ignore(); // Ignore whitespace before getline
             std::getline(std::cin, line);
 
-            // Parse command line arguments
+            // Parse command line arguments with support for quoted strings
             std::vector<std::string> tokens;
-            std::istringstream iss(line);
             std::string token;
-            while (iss >> token) {
+            bool inQuotes = false;
+            bool escape = false;
+
+            for (size_t i = 0; i < line.length(); ++i) {
+                char c = line[i];
+
+                if (escape) {
+                    token += c;
+                    escape = false;
+                    continue;
+                }
+
+                if (c == '\\' && i + 1 < line.length() && line[i + 1] == '"') {
+                    escape = true;
+                    continue;
+                }
+
+                if (c == '"') {
+                    inQuotes = !inQuotes;
+                    continue;
+                }
+
+                if (c == ' ' && !inQuotes) {
+                    if (!token.empty()) {
+                        tokens.push_back(token);
+                        token.clear();
+                    }
+                    continue;
+                }
+
+                token += c;
+            }
+
+            if (!token.empty()) {
                 tokens.push_back(token);
             }
 

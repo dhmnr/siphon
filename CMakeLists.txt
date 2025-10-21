@@ -133,9 +133,11 @@ add_executable(siphon_client
     ${GRPC_SRCS}
 )
 
+
 target_link_libraries(siphon_client
     gRPC::grpc++
     protobuf::libprotobuf
+    tomlplusplus::tomlplusplus
 )
 
 

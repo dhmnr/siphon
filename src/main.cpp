@@ -1,6 +1,3 @@
-#include "process_attribute.h"
-#include "process_input.h"
-#include "process_memory.h"
 #include "server.h"
 #include "spdlog/async.h"
 #include "spdlog/sinks/rotating_file_sink.h"
@@ -8,11 +5,8 @@
 #include "utils.h"
 #include <CLI/CLI.hpp>
 #include <iostream>
-#include <map>
-#include <psapi.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
-#include <tlhelp32.h>
 #include <windows.h>
 
 void InitLogger(bool use_stdout) {
@@ -37,61 +31,25 @@ void InitLogger(bool use_stdout) {
 
 int main(int argc, char *argv[]) {
     InitLogger(true);
-    CLI::App app;
-    std::string config;
-    app.add_option("--config", config, "Config file path, defaults to siphon_config.toml")
-        ->default_str("siphon_config.toml");
+    CLI::App app{"Siphon Server - Remote Process Control"};
     CLI11_PARSE(app, argc, argv);
-
-    spdlog::info("================================================");
-    spdlog::info("Starting Siphon Server v0.0.1");
-    spdlog::info("================================================");
-
-    std::string processName;
-    std::string processWindowName;
-    std::map<std::string, ProcessAttribute> processAttributes;
-    HWND processWindow;
 
     if (!IsRunAsAdmin()) {
         spdlog::error("ERROR: Must run as Administrator!");
         system("pause");
         return 1;
     }
-    // Get attribute file from command line
-    GetProcessInfoFromTOML(config, &processName, &processAttributes, &processWindowName);
-    PrintProcessAttributes(processAttributes);
-    spdlog::info("Process window name: {} | Process name: {}", processWindowName, processName);
 
-    GetProcessWindow(&processWindowName, &processWindow);
-
-    ProcessMemory memory(processName, processAttributes);
-    ProcessInput input_;
-    ProcessCapture capture;
-
-    if (capture.Initialize(processWindow)) {
-        spdlog::info("Process capture initialized successfully!");
-    } else {
-        spdlog::error("Failed to initialize process capture!");
-    }
-    if (memory.Initialize()) {
-        spdlog::info("Process memory initialized successfully!");
-    } else {
-        spdlog::error("Failed to initialize process memory!");
-    }
-    if (input_.Initialize(processWindow)) {
-        spdlog::info("Process input initialized successfully!");
-    } else {
-        spdlog::error("Failed to initialize process input!");
-    }
-
-    if (BringToFocus(processWindow)) {
-        spdlog::info("Process window focused successfully!");
-    } else {
-        spdlog::error("Failed to focus process window!");
-    }
+    spdlog::info("================================================");
+    spdlog::info("Starting Siphon Server v0.0.2");
+    spdlog::info("================================================");
+    spdlog::info("Server will start without target process.");
+    spdlog::info("Use client to configure and initialize components.");
+    spdlog::info("================================================");
 
     spdlog::info("Starting gRPC Server...");
-    RunServer(&memory, &input_, &capture);
+    RunServer();
+
     spdlog::info("================================================");
     spdlog::info("Exiting Siphon Server");
     spdlog::info("================================================");

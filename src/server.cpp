@@ -8,10 +8,12 @@
 #include <string>
 #include <thread>
 
+#include "process_attribute.h"
 #include "process_capture.h"
 #include "process_input.h"
 #include "process_memory.h"
 #include "siphon_service.grpc.pb.h"
+#include "utils.h"
 #include <grpcpp/grpcpp.h>
 #include <spdlog/spdlog.h>
 
@@ -23,28 +25,46 @@ using siphon_service::CaptureFrameRequest;
 using siphon_service::CaptureFrameResponse;
 using siphon_service::ExecuteCommandRequest;
 using siphon_service::ExecuteCommandResponse;
+using siphon_service::GetServerStatusRequest;
+using siphon_service::GetServerStatusResponse;
 using siphon_service::GetSiphonRequest;
 using siphon_service::GetSiphonResponse;
+using siphon_service::InitializeCaptureRequest;
+using siphon_service::InitializeCaptureResponse;
+using siphon_service::InitializeInputRequest;
+using siphon_service::InitializeInputResponse;
+using siphon_service::InitializeMemoryRequest;
+using siphon_service::InitializeMemoryResponse;
 using siphon_service::InputKeyTapRequest;
 using siphon_service::InputKeyTapResponse;
 using siphon_service::InputKeyToggleRequest;
 using siphon_service::InputKeyToggleResponse;
 using siphon_service::MoveMouseRequest;
 using siphon_service::MoveMouseResponse;
+using siphon_service::ProcessAttributeProto;
+using siphon_service::SetProcessConfigRequest;
+using siphon_service::SetProcessConfigResponse;
 using siphon_service::SetSiphonRequest;
 using siphon_service::SetSiphonResponse;
 using siphon_service::SiphonService;
 
 class SiphonServiceImpl final : public SiphonService::Service {
   private:
-    ProcessMemory *memory_;
-    ProcessInput *input_;
-    ProcessCapture *capture_;
+    std::unique_ptr<ProcessMemory> memory_;
+    std::unique_ptr<ProcessInput> input_;
+    std::unique_ptr<ProcessCapture> capture_;
     mutable std::mutex mutex_;
 
+    // Configuration storage
+    std::string processName_;
+    std::string processWindowName_;
+    std::map<std::string, ProcessAttribute> processAttributes_;
+    HWND processWindow_ = nullptr;
+    DWORD processId_ = 0;
+    bool configSet_ = false;
+
   public:
-    SiphonServiceImpl(ProcessMemory *memory, ProcessInput *input, ProcessCapture *capture)
-        : memory_(memory), input_(input), capture_(capture) {}
+    SiphonServiceImpl() : memory_(nullptr), input_(nullptr), capture_(nullptr) {}
 
     Status GetAttribute(ServerContext *context, const GetSiphonRequest *request,
                         GetSiphonResponse *response) override {
@@ -217,6 +237,235 @@ class SiphonServiceImpl final : public SiphonService::Service {
         return Status::OK;
     }
 
+    Status SetProcessConfig(ServerContext *context, const SetProcessConfigRequest *request,
+                            SetProcessConfigResponse *response) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        try {
+            processName_ = request->process_name();
+            processWindowName_ = request->process_window_name();
+            processAttributes_.clear();
+
+            // Convert protobuf attributes to ProcessAttribute map
+            for (const auto &attr : request->attributes()) {
+                ProcessAttribute processAttr;
+                processAttr.AttributeName = attr.name();
+                processAttr.AttributePattern = attr.pattern();
+                processAttr.AttributeOffsets.assign(attr.offsets().begin(), attr.offsets().end());
+                processAttr.AttributeType = attr.type();
+                processAttr.AttributeLength = static_cast<size_t>(attr.length());
+                processAttr.AttributeMethod = attr.method();
+
+                processAttributes_[attr.name()] = processAttr;
+            }
+
+            configSet_ = true;
+
+            spdlog::info("Process configuration set: name={}, window={}, attributes={}",
+                         processName_, processWindowName_, processAttributes_.size());
+
+            response->set_success(true);
+            response->set_message("Process configuration set successfully");
+        } catch (const std::exception &e) {
+            spdlog::error("Failed to set process config: {}", e.what());
+            response->set_success(false);
+            response->set_message("Failed to set process config: " + std::string(e.what()));
+        }
+
+        return Status::OK;
+    }
+
+    Status InitializeMemory(ServerContext *context, const InitializeMemoryRequest *request,
+                            InitializeMemoryResponse *response) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!configSet_) {
+            spdlog::error("Cannot initialize memory: process config not set");
+            response->set_success(false);
+            response->set_message("Process configuration not set. Call SetProcessConfig first.");
+            return Status::OK;
+        }
+
+        try {
+            spdlog::info("Initializing memory for process: {}", processName_);
+
+            // Create ProcessMemory instance
+            memory_ = std::make_unique<ProcessMemory>(processName_, processAttributes_);
+
+            // Initialize memory
+            if (!memory_->Initialize()) {
+                spdlog::error("Failed to initialize ProcessMemory");
+                memory_.reset();
+                response->set_success(false);
+                response->set_message("Failed to initialize memory subsystem");
+                return Status::OK;
+            }
+
+            // Store process ID (get it from ProcessMemory's FindProcessByName)
+            processId_ = memory_->FindProcessByName(processName_);
+
+            spdlog::info("Memory initialized successfully! Process ID: {}", processId_);
+
+            response->set_success(true);
+            response->set_message("Memory initialized successfully");
+            response->set_process_id(processId_);
+
+        } catch (const std::exception &e) {
+            spdlog::error("Exception during memory initialization: {}", e.what());
+            memory_.reset();
+            response->set_success(false);
+            response->set_message("Exception during memory initialization: " +
+                                  std::string(e.what()));
+        }
+
+        return Status::OK;
+    }
+
+    Status InitializeInput(ServerContext *context, const InitializeInputRequest *request,
+                           InitializeInputResponse *response) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!configSet_) {
+            spdlog::error("Cannot initialize input: process config not set");
+            response->set_success(false);
+            response->set_message("Process configuration not set. Call SetProcessConfig first.");
+            return Status::OK;
+        }
+
+        try {
+            // Use override window name if provided, otherwise use configured one
+            std::string windowName =
+                request->window_name().empty() ? processWindowName_ : request->window_name();
+
+            spdlog::info("Initializing input for window: {}", windowName);
+
+            // Find process window
+            if (!GetProcessWindow(&windowName, &processWindow_)) {
+                spdlog::error("Failed to find process window: {}", windowName);
+                response->set_success(false);
+                response->set_message("Failed to find process window: " + windowName);
+                return Status::OK;
+            }
+
+            spdlog::info("Found process window: 0x{:X}",
+                         reinterpret_cast<uintptr_t>(processWindow_));
+
+            // Create ProcessInput instance
+            input_ = std::make_unique<ProcessInput>();
+
+            // Initialize input
+            if (!input_->Initialize(processWindow_)) {
+                spdlog::error("Failed to initialize ProcessInput");
+                input_.reset();
+                response->set_success(false);
+                response->set_message("Failed to initialize input subsystem");
+                return Status::OK;
+            }
+
+            // Bring window to focus
+            if (BringToFocus(processWindow_)) {
+                spdlog::info("Process window focused successfully!");
+            } else {
+                spdlog::warn("Failed to focus process window (non-critical)");
+            }
+
+            spdlog::info("Input initialized successfully!");
+
+            response->set_success(true);
+            response->set_message("Input initialized successfully");
+
+        } catch (const std::exception &e) {
+            spdlog::error("Exception during input initialization: {}", e.what());
+            input_.reset();
+            response->set_success(false);
+            response->set_message("Exception during input initialization: " +
+                                  std::string(e.what()));
+        }
+
+        return Status::OK;
+    }
+
+    Status InitializeCapture(ServerContext *context, const InitializeCaptureRequest *request,
+                             InitializeCaptureResponse *response) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!configSet_) {
+            spdlog::error("Cannot initialize capture: process config not set");
+            response->set_success(false);
+            response->set_message("Process configuration not set. Call SetProcessConfig first.");
+            return Status::OK;
+        }
+
+        try {
+            // Use override window name if provided, otherwise use configured one
+            std::string windowName =
+                request->window_name().empty() ? processWindowName_ : request->window_name();
+
+            // If window wasn't found during input init, find it now
+            if (processWindow_ == nullptr) {
+                spdlog::info("Finding process window for capture: {}", windowName);
+                if (!GetProcessWindow(&windowName, &processWindow_)) {
+                    spdlog::error("Failed to find process window: {}", windowName);
+                    response->set_success(false);
+                    response->set_message("Failed to find process window: " + windowName);
+                    return Status::OK;
+                }
+            }
+
+            spdlog::info("Initializing capture for window: 0x{:X}",
+                         reinterpret_cast<uintptr_t>(processWindow_));
+
+            // Create ProcessCapture instance
+            capture_ = std::make_unique<ProcessCapture>();
+
+            // Initialize capture
+            if (!capture_->Initialize(processWindow_)) {
+                spdlog::error("Failed to initialize ProcessCapture");
+                capture_.reset();
+                response->set_success(false);
+                response->set_message("Failed to initialize capture subsystem");
+                return Status::OK;
+            }
+
+            spdlog::info("Capture initialized successfully! Window size: {}x{}",
+                         capture_->processWindowWidth, capture_->processWindowHeight);
+
+            response->set_success(true);
+            response->set_message("Capture initialized successfully");
+            response->set_window_width(capture_->processWindowWidth);
+            response->set_window_height(capture_->processWindowHeight);
+
+        } catch (const std::exception &e) {
+            spdlog::error("Exception during capture initialization: {}", e.what());
+            capture_.reset();
+            response->set_success(false);
+            response->set_message("Exception during capture initialization: " +
+                                  std::string(e.what()));
+        }
+
+        return Status::OK;
+    }
+
+    Status GetServerStatus(ServerContext *context, const GetServerStatusRequest *request,
+                           GetServerStatusResponse *response) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        response->set_success(true);
+        response->set_message("Server status retrieved successfully");
+        response->set_config_set(configSet_);
+        response->set_memory_initialized(memory_ != nullptr);
+        response->set_input_initialized(input_ != nullptr);
+        response->set_capture_initialized(capture_ != nullptr);
+        response->set_process_name(processName_);
+        response->set_window_name(processWindowName_);
+        response->set_process_id(processId_);
+
+        spdlog::info("Status check - Config: {}, Memory: {}, Input: {}, Capture: {}", configSet_,
+                     (memory_ != nullptr), (input_ != nullptr), (capture_ != nullptr));
+
+        return Status::OK;
+    }
+
     Status ExecuteCommand(ServerContext *context, const ExecuteCommandRequest *request,
                           ExecuteCommandResponse *response) override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -239,9 +488,16 @@ class SiphonServiceImpl final : public SiphonService::Service {
                 if (GetCurrentDirectoryA(MAX_PATH, buffer)) {
                     original_dir = buffer;
                 }
-                if (!SetCurrentDirectoryA(request->working_directory().c_str())) {
-                    spdlog::error("Failed to set working directory to: {}",
-                                  request->working_directory());
+
+                // Strip surrounding quotes if present
+                std::string working_dir = request->working_directory();
+                if (working_dir.length() >= 2 && working_dir.front() == '"' &&
+                    working_dir.back() == '"') {
+                    working_dir = working_dir.substr(1, working_dir.length() - 2);
+                }
+
+                if (!SetCurrentDirectoryA(working_dir.c_str())) {
+                    spdlog::error("Failed to set working directory to: {}", working_dir);
                     response->set_success(false);
                     response->set_message("Failed to set working directory");
                     response->set_exit_code(-1);
@@ -310,9 +566,9 @@ class SiphonServiceImpl final : public SiphonService::Service {
     }
 };
 
-void RunServer(ProcessMemory *memory, ProcessInput *input, ProcessCapture *capture) {
+void RunServer() {
     std::string server_address("0.0.0.0:50051");
-    SiphonServiceImpl service(memory, input, capture);
+    SiphonServiceImpl service;
 
     ServerBuilder builder;
     builder.SetMaxReceiveMessageSize(100 * 1024 * 1024); // 100MB
@@ -322,6 +578,7 @@ void RunServer(ProcessMemory *memory, ProcessInput *input, ProcessCapture *captu
 
     std::unique_ptr<Server> server(builder.BuildAndStart());
     spdlog::info("Server listening on {}", server_address);
+    spdlog::info("Waiting for client to set configuration and initialize components...");
 
     server->Wait();
 }
