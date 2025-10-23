@@ -267,7 +267,12 @@ uintptr_t ProcessMemory::FindPtrFromDll(const std::string &pattern) {
     spdlog::info("Target function at: 0x{:x}", functionAddr);
 
     // 2. Get DLL path (must be absolute!)
-    std::filesystem::path dllPath = std::filesystem::current_path() / "hook.dll";
+    // Get the executable's directory, not the current working directory
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(NULL, exePath, MAX_PATH);
+    std::filesystem::path exeDir = std::filesystem::path(exePath).parent_path();
+    std::filesystem::path dllPath = exeDir / "hook.dll";
+
     if (!std::filesystem::exists(dllPath)) {
         spdlog::error("Error: hook.dll not found at: {}", dllPath.string().c_str());
         return 1;

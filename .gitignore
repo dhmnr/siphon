@@ -43,4 +43,7 @@
 build/
 logs/
 
+# PID file for daemon mode
+*.pid
+
 !external/**
