@@ -54,7 +54,7 @@ class ProcessRecorder {
     std::atomic<bool> isRecording_;
     std::atomic<bool> shouldStop_;
     std::thread recordingThread_;
-    std::thread keystrokeThread_;
+    std::thread hookThread_;
 
     // Configuration
     std::vector<std::string> attributeNames_;
@@ -69,10 +69,13 @@ class ProcessRecorder {
     RecordingStats stats_;
     std::mutex statsMutex_;
 
-    // Keystroke monitoring
+    // Keystroke and mouse monitoring
     std::vector<std::string> currentKeysPressed_;
     std::mutex keystrokeMutex_;
-    InterceptionContext keystrokeContext_;
+    HHOOK keyboardHook_;
+    HHOOK mouseHook_;
+    std::atomic<bool> hooksReady_;
+    static ProcessRecorder *instance_; // For static hook callback
 
     // Metadata buffer for writing
     std::vector<FrameData> frameDataBuffer_;
@@ -80,7 +83,9 @@ class ProcessRecorder {
 
     // Private methods
     void RecordingLoop();
-    void KeystrokeMonitorLoop();
+    void HookMessageLoop();
+    static LRESULT CALLBACK KeyboardHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+    static LRESULT CALLBACK MouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
     bool CaptureFrame(FrameData &frameData);
     bool ReadMemoryAttributes(FrameData &frameData);
     bool CaptureKeystrokes(FrameData &frameData);
@@ -89,6 +94,7 @@ class ProcessRecorder {
     std::string GenerateSessionId();
     bool CreateOutputDirectories();
     std::vector<std::string> GetCurrentKeysPressed();
+    std::string VirtualKeyToString(DWORD vkCode);
 
   public:
     ProcessRecorder(ProcessCapture *capture, ProcessMemory *memory, ProcessInput *input);

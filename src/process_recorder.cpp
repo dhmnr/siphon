@@ -9,11 +9,14 @@
 
 namespace fs = std::filesystem;
 
+// Static instance for hook callback
+ProcessRecorder *ProcessRecorder::instance_ = nullptr;
+
 ProcessRecorder::ProcessRecorder(ProcessCapture *capture, ProcessMemory *memory,
                                  ProcessInput *input)
     : capture_(capture), memory_(memory), input_(input), isRecording_(false), shouldStop_(false),
       currentFrame_(0), droppedFrames_(0), currentLatencyMs_(0.0), maxDurationSeconds_(0),
-      keystrokeContext_(nullptr) {
+      keyboardHook_(nullptr), mouseHook_(nullptr), hooksReady_(false) {
 
     // Initialize stats
     stats_.totalFrames = 0;
@@ -25,6 +28,8 @@ ProcessRecorder::ProcessRecorder(ProcessCapture *capture, ProcessMemory *memory,
     stats_.endTimeMs = 0;
     stats_.actualDurationSeconds = 0.0;
     stats_.actualFps = 0.0;
+
+    instance_ = this;
 }
 
 ProcessRecorder::~ProcessRecorder() {
@@ -33,13 +38,26 @@ ProcessRecorder::~ProcessRecorder() {
         if (recordingThread_.joinable()) {
             recordingThread_.join();
         }
-        if (keystrokeThread_.joinable()) {
-            keystrokeThread_.join();
-        }
     }
 
-    if (keystrokeContext_) {
-        interception_destroy_context(keystrokeContext_);
+    if (keyboardHook_) {
+        UnhookWindowsHookEx(keyboardHook_);
+        keyboardHook_ = nullptr;
+    }
+    
+    if (mouseHook_) {
+        UnhookWindowsHookEx(mouseHook_);
+        mouseHook_ = nullptr;
+    }
+
+    // Stop hook thread
+    if (hookThread_.joinable()) {
+        PostThreadMessage(GetThreadId(hookThread_.native_handle()), WM_QUIT, 0, 0);
+        hookThread_.join();
+    }
+    
+    if (instance_ == this) {
+        instance_ = nullptr;
     }
 }
 
@@ -123,22 +141,29 @@ bool ProcessRecorder::StartRecording(const std::vector<std::string> &attributeNa
                              std::chrono::system_clock::now().time_since_epoch())
                              .count();
 
-    // Initialize keystroke monitoring
-    keystrokeContext_ = interception_create_context();
-    if (!keystrokeContext_) {
-        spdlog::error("Failed to create Interception context for keystroke monitoring");
-        return false;
+    // Start hook thread (must have message loop for hooks to work)
+    hooksReady_ = false;
+    hookThread_ = std::thread(&ProcessRecorder::HookMessageLoop, this);
+
+    // Wait for hooks to be ready
+    auto startTime = std::chrono::steady_clock::now();
+    while (!hooksReady_) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        auto elapsed = std::chrono::steady_clock::now() - startTime;
+        if (elapsed > std::chrono::seconds(5)) {
+            spdlog::error("Timeout waiting for hooks to initialize");
+            if (hookThread_.joinable()) {
+                PostThreadMessage(GetThreadId(hookThread_.native_handle()), WM_QUIT, 0, 0);
+                hookThread_.join();
+            }
+            return false;
+        }
     }
 
-    // Set filter to capture all keyboard events
-    interception_set_filter(keystrokeContext_, interception_is_keyboard,
-                            INTERCEPTION_FILTER_KEY_DOWN | INTERCEPTION_FILTER_KEY_UP);
-
-    // Start threads
+    // Start recording thread
     shouldStop_ = false;
     isRecording_ = true;
 
-    keystrokeThread_ = std::thread(&ProcessRecorder::KeystrokeMonitorLoop, this);
     recordingThread_ = std::thread(&ProcessRecorder::RecordingLoop, this);
 
     spdlog::info("Recording started - Session ID: {}", sessionId_);
@@ -157,15 +182,18 @@ bool ProcessRecorder::StopRecording(RecordingStats &stats) {
     spdlog::info("Stopping recording...");
     shouldStop_ = true;
 
-    // Wait for threads to finish
+    // Wait for recording thread to finish
     if (recordingThread_.joinable()) {
         recordingThread_.join();
     }
-    if (keystrokeThread_.joinable()) {
-        keystrokeThread_.join();
-    }
 
     isRecording_ = false;
+
+    // Stop hook thread
+    if (hookThread_.joinable()) {
+        PostThreadMessage(GetThreadId(hookThread_.native_handle()), WM_QUIT, 0, 0);
+        hookThread_.join();
+    }
 
     // Write metadata to file
     WriteMetadataToFile();
@@ -195,12 +223,6 @@ bool ProcessRecorder::StopRecording(RecordingStats &stats) {
     spdlog::info("Recording stopped - Total frames: {}, Dropped: {}, Avg latency: {:.2f}ms",
                  stats.totalFrames, stats.droppedFrames, stats.averageLatencyMs);
 
-    // Cleanup
-    if (keystrokeContext_) {
-        interception_destroy_context(keystrokeContext_);
-        keystrokeContext_ = nullptr;
-    }
-
     return true;
 }
 
@@ -223,60 +245,260 @@ bool ProcessRecorder::GetStatus(bool &isRecording, int &currentFrame, double &el
     return true;
 }
 
-void ProcessRecorder::KeystrokeMonitorLoop() {
-    spdlog::info("Keystroke monitor thread started");
+// Static keyboard hook callback
+LRESULT CALLBACK ProcessRecorder::KeyboardHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode >= 0 && instance_) {
+        KBDLLHOOKSTRUCT *pKeyBoard = (KBDLLHOOKSTRUCT *)lParam;
+        std::string keyName = instance_->VirtualKeyToString(pKeyBoard->vkCode);
 
-    std::map<unsigned short, std::string> scancodeToString;
+        std::lock_guard<std::mutex> lock(instance_->keystrokeMutex_);
 
-    // Build reverse map from scancode to key name
-    for (const auto &pair : scancodeMap) {
-        scancodeToString[pair.second] = pair.first;
-    }
-
-    while (!shouldStop_) {
-        InterceptionDevice device;
-        InterceptionStroke stroke;
-
-        // Non-blocking receive with timeout
-        if (interception_receive(keystrokeContext_,
-                                 device = interception_wait_with_timeout(keystrokeContext_, 10),
-                                 &stroke, 1) > 0) {
-
-            if (interception_is_keyboard(device)) {
-                InterceptionKeyStroke *keyStroke = (InterceptionKeyStroke *)&stroke;
-
-                std::string keyName = "UNKNOWN";
-                if (scancodeToString.find(keyStroke->code) != scancodeToString.end()) {
-                    keyName = scancodeToString[keyStroke->code];
-                }
-
-                std::lock_guard<std::mutex> lock(keystrokeMutex_);
-
-                if (keyStroke->state & INTERCEPTION_KEY_DOWN) {
-                    // Key pressed
-                    if (std::find(currentKeysPressed_.begin(), currentKeysPressed_.end(),
-                                  keyName) == currentKeysPressed_.end()) {
-                        currentKeysPressed_.push_back(keyName);
-                    }
-                } else if (keyStroke->state & INTERCEPTION_KEY_UP) {
-                    // Key released
-                    currentKeysPressed_.erase(std::remove(currentKeysPressed_.begin(),
-                                                          currentKeysPressed_.end(), keyName),
-                                              currentKeysPressed_.end());
-                }
+        if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
+            // Key pressed
+            if (std::find(instance_->currentKeysPressed_.begin(),
+                          instance_->currentKeysPressed_.end(),
+                          keyName) == instance_->currentKeysPressed_.end()) {
+                instance_->currentKeysPressed_.push_back(keyName);
             }
-
-            // Pass through the keystroke
-            interception_send(keystrokeContext_, device, &stroke, 1);
+        } else if (wParam == WM_KEYUP || wParam == WM_SYSKEYUP) {
+            // Key released
+            instance_->currentKeysPressed_.erase(std::remove(instance_->currentKeysPressed_.begin(),
+                                                             instance_->currentKeysPressed_.end(),
+                                                             keyName),
+                                                 instance_->currentKeysPressed_.end());
         }
     }
 
-    spdlog::info("Keystroke monitor thread stopped");
+    return CallNextHookEx(NULL, nCode, wParam, lParam);
+}
+
+// Convert Windows Virtual Key Code to string
+std::string ProcessRecorder::VirtualKeyToString(DWORD vkCode) {
+    // Map virtual key codes to key names (matching Interception naming)
+    static std::map<DWORD, std::string> vkMap = {{VK_ESCAPE, "ESC"},
+                                                 {VK_BACK, "BACKSPACE"},
+                                                 {VK_TAB, "TAB"},
+                                                 {VK_RETURN, "ENTER"},
+                                                 {VK_SPACE, "SPACE"},
+                                                 {VK_CAPITAL, "CAPSLOCK"},
+                                                 {VK_NUMLOCK, "NUMLOCK"},
+                                                 {VK_SCROLL, "SCROLLLOCK"},
+                                                 {VK_LSHIFT, "LEFT_SHIFT"},
+                                                 {VK_RSHIFT, "RIGHT_SHIFT"},
+                                                 {VK_LCONTROL, "LEFT_CTRL"},
+                                                 {VK_LMENU, "LEFT_ALT"},
+
+                                                 // Function keys
+                                                 {VK_F1, "F1"},
+                                                 {VK_F2, "F2"},
+                                                 {VK_F3, "F3"},
+                                                 {VK_F4, "F4"},
+                                                 {VK_F5, "F5"},
+                                                 {VK_F6, "F6"},
+                                                 {VK_F7, "F7"},
+                                                 {VK_F8, "F8"},
+                                                 {VK_F9, "F9"},
+                                                 {VK_F10, "F10"},
+                                                 {VK_F11, "F11"},
+                                                 {VK_F12, "F12"},
+
+                                                 // Letters
+                                                 {0x41, "A"},
+                                                 {0x42, "B"},
+                                                 {0x43, "C"},
+                                                 {0x44, "D"},
+                                                 {0x45, "E"},
+                                                 {0x46, "F"},
+                                                 {0x47, "G"},
+                                                 {0x48, "H"},
+                                                 {0x49, "I"},
+                                                 {0x4A, "J"},
+                                                 {0x4B, "K"},
+                                                 {0x4C, "L"},
+                                                 {0x4D, "M"},
+                                                 {0x4E, "N"},
+                                                 {0x4F, "O"},
+                                                 {0x50, "P"},
+                                                 {0x51, "Q"},
+                                                 {0x52, "R"},
+                                                 {0x53, "S"},
+                                                 {0x54, "T"},
+                                                 {0x55, "U"},
+                                                 {0x56, "V"},
+                                                 {0x57, "W"},
+                                                 {0x58, "X"},
+                                                 {0x59, "Y"},
+                                                 {0x5A, "Z"},
+
+                                                 // Numbers
+                                                 {0x30, "0"},
+                                                 {0x31, "1"},
+                                                 {0x32, "2"},
+                                                 {0x33, "3"},
+                                                 {0x34, "4"},
+                                                 {0x35, "5"},
+                                                 {0x36, "6"},
+                                                 {0x37, "7"},
+                                                 {0x38, "8"},
+                                                 {0x39, "9"},
+
+                                                 // Numpad
+                                                 {VK_NUMPAD0, "KEYPAD_0"},
+                                                 {VK_NUMPAD1, "KEYPAD_1"},
+                                                 {VK_NUMPAD2, "KEYPAD_2"},
+                                                 {VK_NUMPAD3, "KEYPAD_3"},
+                                                 {VK_NUMPAD4, "KEYPAD_4"},
+                                                 {VK_NUMPAD5, "KEYPAD_5"},
+                                                 {VK_NUMPAD6, "KEYPAD_6"},
+                                                 {VK_NUMPAD7, "KEYPAD_7"},
+                                                 {VK_NUMPAD8, "KEYPAD_8"},
+                                                 {VK_NUMPAD9, "KEYPAD_9"},
+
+                                                 // Symbols
+                                                 {VK_OEM_MINUS, "MINUS"},
+                                                 {VK_OEM_PLUS, "EQUALS"},
+                                                 {VK_OEM_4, "LEFT_BRACKET"},
+                                                 {VK_OEM_6, "RIGHT_BRACKET"},
+                                                 {VK_OEM_1, "SEMICOLON"},
+                                                 {VK_OEM_7, "APOSTROPHE"},
+                                                 {VK_OEM_3, "GRAVE"},
+                                                 {VK_OEM_5, "BACKSLASH"},
+                                                 {VK_OEM_COMMA, "COMMA"},
+                                                 {VK_OEM_PERIOD, "PERIOD"},
+                                                 {VK_OEM_2, "SLASH"}};
+
+    auto it = vkMap.find(vkCode);
+    if (it != vkMap.end()) {
+        return it->second;
+    }
+
+    return "UNKNOWN_" + std::to_string(vkCode);
+}
+
+// Static mouse hook callback
+LRESULT CALLBACK ProcessRecorder::MouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode >= 0 && instance_) {
+        std::lock_guard<std::mutex> lock(instance_->keystrokeMutex_);
+
+        std::string buttonName;
+        bool isPress = false;
+
+        switch (wParam) {
+        case WM_LBUTTONDOWN:
+            buttonName = "MOUSE_LEFT";
+            isPress = true;
+            break;
+        case WM_LBUTTONUP:
+            buttonName = "MOUSE_LEFT";
+            isPress = false;
+            break;
+        case WM_RBUTTONDOWN:
+            buttonName = "MOUSE_RIGHT";
+            isPress = true;
+            break;
+        case WM_RBUTTONUP:
+            buttonName = "MOUSE_RIGHT";
+            isPress = false;
+            break;
+        case WM_MBUTTONDOWN:
+            buttonName = "MOUSE_MIDDLE";
+            isPress = true;
+            break;
+        case WM_MBUTTONUP:
+            buttonName = "MOUSE_MIDDLE";
+            isPress = false;
+            break;
+        case WM_XBUTTONDOWN: {
+            MSLLHOOKSTRUCT *pMouse = (MSLLHOOKSTRUCT *)lParam;
+            if (HIWORD(pMouse->mouseData) == XBUTTON1) {
+                buttonName = "MOUSE_BUTTON4";
+            } else if (HIWORD(pMouse->mouseData) == XBUTTON2) {
+                buttonName = "MOUSE_BUTTON5";
+            }
+            isPress = true;
+            break;
+        }
+        case WM_XBUTTONUP: {
+            MSLLHOOKSTRUCT *pMouse = (MSLLHOOKSTRUCT *)lParam;
+            if (HIWORD(pMouse->mouseData) == XBUTTON1) {
+                buttonName = "MOUSE_BUTTON4";
+            } else if (HIWORD(pMouse->mouseData) == XBUTTON2) {
+                buttonName = "MOUSE_BUTTON5";
+            }
+            isPress = false;
+            break;
+        }
+        }
+
+        if (!buttonName.empty()) {
+            if (isPress) {
+                // Button pressed
+                if (std::find(instance_->currentKeysPressed_.begin(),
+                             instance_->currentKeysPressed_.end(),
+                             buttonName) == instance_->currentKeysPressed_.end()) {
+                    instance_->currentKeysPressed_.push_back(buttonName);
+                }
+            } else {
+                // Button released
+                instance_->currentKeysPressed_.erase(
+                    std::remove(instance_->currentKeysPressed_.begin(),
+                               instance_->currentKeysPressed_.end(), buttonName),
+                    instance_->currentKeysPressed_.end());
+            }
+        }
+    }
+
+    return CallNextHookEx(NULL, nCode, wParam, lParam);
 }
 
 std::vector<std::string> ProcessRecorder::GetCurrentKeysPressed() {
     std::lock_guard<std::mutex> lock(keystrokeMutex_);
     return currentKeysPressed_;
+}
+
+// Hook message loop thread - required for hooks to work
+void ProcessRecorder::HookMessageLoop() {
+    spdlog::info("Hook message loop thread started");
+
+    // Install keyboard hook
+    keyboardHook_ = SetWindowsHookEx(WH_KEYBOARD_LL, KeyboardHookProc, GetModuleHandle(NULL), 0);
+    if (!keyboardHook_) {
+        spdlog::error("Failed to create keyboard hook: {}", GetLastError());
+        hooksReady_ = true;
+        return;
+    }
+
+    // Install mouse hook
+    mouseHook_ = SetWindowsHookEx(WH_MOUSE_LL, MouseHookProc, GetModuleHandle(NULL), 0);
+    if (!mouseHook_) {
+        spdlog::error("Failed to create mouse hook: {}", GetLastError());
+        UnhookWindowsHookEx(keyboardHook_);
+        keyboardHook_ = nullptr;
+        hooksReady_ = true;
+        return;
+    }
+
+    spdlog::info("Keyboard and mouse hooks installed successfully");
+    hooksReady_ = true;
+
+    // Message loop - required for hooks to receive events
+    MSG msg;
+    while (GetMessage(&msg, NULL, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+
+    // Cleanup hooks when message loop exits
+    if (keyboardHook_) {
+        UnhookWindowsHookEx(keyboardHook_);
+        keyboardHook_ = nullptr;
+    }
+    if (mouseHook_) {
+        UnhookWindowsHookEx(mouseHook_);
+        mouseHook_ = nullptr;
+    }
+
+    spdlog::info("Hook message loop thread stopped");
 }
 
 void ProcessRecorder::RecordingLoop() {
@@ -299,6 +521,13 @@ void ProcessRecorder::RecordingLoop() {
                 spdlog::info("Max duration reached, stopping recording");
                 break;
             }
+        }
+
+        // Process Windows messages for keyboard hook to work
+        MSG msg;
+        while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
         }
 
         // Check if a new frame is available from Windows Graphics Capture
