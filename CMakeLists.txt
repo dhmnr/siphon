@@ -79,6 +79,7 @@ add_executable(siphon
     src/server.cpp
     src/process_capture.cpp
     src/process_attribute.cpp
+    src/process_recorder.cpp
     include/dll_injector.h
     include/shared_memory.h
     ${PROTO_SRCS}

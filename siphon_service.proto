@@ -30,6 +30,11 @@ service SiphonService {
   rpc InitializeInput(InitializeInputRequest) returns (InitializeInputResponse);
   rpc InitializeCapture(InitializeCaptureRequest) returns (InitializeCaptureResponse);
   rpc GetServerStatus(GetServerStatusRequest) returns (GetServerStatusResponse);
+
+  // Recording endpoints
+  rpc StartRecording(StartRecordingRequest) returns (StartRecordingResponse);
+  rpc StopRecording(StopRecordingRequest) returns (StopRecordingResponse);
+  rpc GetRecordingStatus(GetRecordingStatusRequest) returns (GetRecordingStatusResponse);
 }
 
 // Request message for getting variable
@@ -216,4 +221,50 @@ message GetServerStatusResponse {
   string process_name = 7;
   string window_name = 8;
   int32 process_id = 9;
+}
+
+// Request message for starting recording
+message StartRecordingRequest {
+  repeated string attribute_names = 1;
+  string output_directory = 2;
+  int32 max_duration_seconds = 3;  // 0 = unlimited
+}
+
+// Response message for starting recording
+message StartRecordingResponse {
+  bool success = 1;
+  string message = 2;
+  string session_id = 3;
+}
+
+// Request message for stopping recording
+message StopRecordingRequest {
+  string session_id = 1;
+}
+
+// Response message for stopping recording
+message StopRecordingResponse {
+  bool success = 1;
+  string message = 2;
+  int32 total_frames = 3;
+  double average_latency_ms = 4;
+  int32 dropped_frames = 5;
+  double actual_duration_seconds = 6;
+  double actual_fps = 7;
+}
+
+// Request message for getting recording status
+message GetRecordingStatusRequest {
+  string session_id = 1;
+}
+
+// Response message for getting recording status
+message GetRecordingStatusResponse {
+  bool success = 1;
+  string message = 2;
+  bool is_recording = 3;
+  int32 current_frame = 4;
+  double elapsed_time_seconds = 5;
+  double current_latency_ms = 6;
+  int32 dropped_frames = 7;
 }

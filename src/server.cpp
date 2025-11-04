@@ -12,6 +12,7 @@
 #include "process_capture.h"
 #include "process_input.h"
 #include "process_memory.h"
+#include "process_recorder.h"
 #include "siphon_service.grpc.pb.h"
 #include "utils.h"
 #include <grpcpp/grpcpp.h>
@@ -25,6 +26,8 @@ using siphon_service::CaptureFrameRequest;
 using siphon_service::CaptureFrameResponse;
 using siphon_service::ExecuteCommandRequest;
 using siphon_service::ExecuteCommandResponse;
+using siphon_service::GetRecordingStatusRequest;
+using siphon_service::GetRecordingStatusResponse;
 using siphon_service::GetServerStatusRequest;
 using siphon_service::GetServerStatusResponse;
 using siphon_service::GetSiphonRequest;
@@ -47,12 +50,17 @@ using siphon_service::SetProcessConfigResponse;
 using siphon_service::SetSiphonRequest;
 using siphon_service::SetSiphonResponse;
 using siphon_service::SiphonService;
+using siphon_service::StartRecordingRequest;
+using siphon_service::StartRecordingResponse;
+using siphon_service::StopRecordingRequest;
+using siphon_service::StopRecordingResponse;
 
 class SiphonServiceImpl final : public SiphonService::Service {
   private:
     std::unique_ptr<ProcessMemory> memory_;
     std::unique_ptr<ProcessInput> input_;
     std::unique_ptr<ProcessCapture> capture_;
+    std::unique_ptr<ProcessRecorder> recorder_;
     mutable std::mutex mutex_;
 
     // Configuration storage
@@ -64,7 +72,8 @@ class SiphonServiceImpl final : public SiphonService::Service {
     bool configSet_ = false;
 
   public:
-    SiphonServiceImpl() : memory_(nullptr), input_(nullptr), capture_(nullptr) {}
+    SiphonServiceImpl()
+        : memory_(nullptr), input_(nullptr), capture_(nullptr), recorder_(nullptr) {}
 
     Status GetAttribute(ServerContext *context, const GetSiphonRequest *request,
                         GetSiphonResponse *response) override {
@@ -560,6 +569,107 @@ class SiphonServiceImpl final : public SiphonService::Service {
             response->set_success(false);
             response->set_message("Exception during command execution: " + std::string(e.what()));
             response->set_exit_code(-1);
+        }
+
+        return Status::OK;
+    }
+
+    Status StartRecording(ServerContext *context, const StartRecordingRequest *request,
+                          StartRecordingResponse *response) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!configSet_ || !capture_ || !memory_) {
+            spdlog::error("Cannot start recording: components not initialized");
+            response->set_success(false);
+            response->set_message("Capture and Memory must be initialized before recording");
+            return Status::OK;
+        }
+
+        // Create recorder if it doesn't exist
+        if (!recorder_) {
+            recorder_ =
+                std::make_unique<ProcessRecorder>(capture_.get(), memory_.get(), input_.get());
+        }
+
+        // Convert repeated field to vector
+        std::vector<std::string> attributeNames(request->attribute_names().begin(),
+                                                request->attribute_names().end());
+
+        if (recorder_->StartRecording(attributeNames, request->output_directory(),
+                                      request->max_duration_seconds())) {
+            response->set_success(true);
+            response->set_message("Recording started successfully");
+            response->set_session_id(recorder_->GetSessionId());
+            spdlog::info("Recording started - Session: {}", recorder_->GetSessionId());
+        } else {
+            response->set_success(false);
+            response->set_message("Failed to start recording");
+            spdlog::error("Failed to start recording");
+        }
+
+        return Status::OK;
+    }
+
+    Status StopRecording(ServerContext *context, const StopRecordingRequest *request,
+                         StopRecordingResponse *response) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!recorder_) {
+            response->set_success(false);
+            response->set_message("No recorder instance exists");
+            return Status::OK;
+        }
+
+        RecordingStats stats;
+        if (recorder_->StopRecording(stats)) {
+            response->set_success(true);
+            response->set_message("Recording stopped successfully");
+            response->set_total_frames(stats.totalFrames);
+            response->set_average_latency_ms(stats.averageLatencyMs);
+            response->set_dropped_frames(stats.droppedFrames);
+            response->set_actual_duration_seconds(stats.actualDurationSeconds);
+            response->set_actual_fps(stats.actualFps);
+            spdlog::info("Recording stopped - Frames: {}, Duration: {:.1f}s, FPS: {:.1f}, Avg "
+                         "latency: {:.2f}ms, Dropped: {}",
+                         stats.totalFrames, stats.actualDurationSeconds, stats.actualFps,
+                         stats.averageLatencyMs, stats.droppedFrames);
+        } else {
+            response->set_success(false);
+            response->set_message("Failed to stop recording");
+        }
+
+        return Status::OK;
+    }
+
+    Status GetRecordingStatus(ServerContext *context, const GetRecordingStatusRequest *request,
+                              GetRecordingStatusResponse *response) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!recorder_) {
+            response->set_success(false);
+            response->set_message("No recorder instance exists");
+            response->set_is_recording(false);
+            return Status::OK;
+        }
+
+        bool isRecording;
+        int currentFrame;
+        double elapsedTime;
+        double currentLatency;
+        int droppedFrames;
+
+        if (recorder_->GetStatus(isRecording, currentFrame, elapsedTime, currentLatency,
+                                 droppedFrames)) {
+            response->set_success(true);
+            response->set_message("Status retrieved successfully");
+            response->set_is_recording(isRecording);
+            response->set_current_frame(currentFrame);
+            response->set_elapsed_time_seconds(elapsedTime);
+            response->set_current_latency_ms(currentLatency);
+            response->set_dropped_frames(droppedFrames);
+        } else {
+            response->set_success(false);
+            response->set_message("Failed to get recording status");
         }
 
         return Status::OK;

@@ -39,6 +39,8 @@ class ProcessCapture {
     ComPtr<ID3D11Texture2D> latestFrame;
     std::mutex frameMutex;
     HWND processWindow;
+    uint64_t frameCounter;
+    uint64_t lastReadFrameCounter;
 
   public:
     int processWindowWidth;
@@ -50,5 +52,6 @@ class ProcessCapture {
     ComPtr<ID3D11Texture2D> GetTextureFromSurface(D3D::IDirect3DSurface surface);
     bool Initialize(HWND processWindow);
     std::vector<uint8_t> GetPixelData();
+    bool IsNewFrameAvailable();
     bool SaveBMP(const std::vector<uint8_t> &pixels, const char *filename);
 };

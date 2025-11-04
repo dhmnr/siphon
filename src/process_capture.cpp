@@ -20,7 +20,7 @@
 
 #include "process_capture.h"
 
-ProcessCapture::ProcessCapture() {}
+ProcessCapture::ProcessCapture() : frameCounter(0), lastReadFrameCounter(0) {}
 
 ProcessCapture::~ProcessCapture() {}
 
@@ -92,6 +92,7 @@ bool ProcessCapture::Initialize(HWND processWindow) {
         if (frame) {
             std::lock_guard<std::mutex> lock(frameMutex);
             this->latestFrame = GetTextureFromSurface(frame.Surface());
+            this->frameCounter++;
         }
     });
 
@@ -100,12 +101,21 @@ bool ProcessCapture::Initialize(HWND processWindow) {
     return true;
 }
 
+// Check if a new frame is available (not previously read)
+bool ProcessCapture::IsNewFrameAvailable() {
+    std::lock_guard<std::mutex> lock(frameMutex);
+    return frameCounter > lastReadFrameCounter;
+}
+
 // Call this from gRPC handler
 std::vector<uint8_t> ProcessCapture::GetPixelData() {
     std::lock_guard<std::mutex> lock(frameMutex);
 
     if (!this->latestFrame)
         return {};
+
+    // Mark this frame as read
+    lastReadFrameCounter = frameCounter;
 
     // Copy texture to CPU readable format
     D3D11_TEXTURE2D_DESC desc;

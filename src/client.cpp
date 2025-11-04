@@ -21,6 +21,8 @@ using siphon_service::CaptureFrameRequest;
 using siphon_service::CaptureFrameResponse;
 using siphon_service::ExecuteCommandRequest;
 using siphon_service::ExecuteCommandResponse;
+using siphon_service::GetRecordingStatusRequest;
+using siphon_service::GetRecordingStatusResponse;
 using siphon_service::GetServerStatusRequest;
 using siphon_service::GetServerStatusResponse;
 using siphon_service::GetSiphonRequest;
@@ -43,6 +45,10 @@ using siphon_service::SetProcessConfigResponse;
 using siphon_service::SetSiphonRequest;
 using siphon_service::SetSiphonResponse;
 using siphon_service::SiphonService;
+using siphon_service::StartRecordingRequest;
+using siphon_service::StartRecordingResponse;
+using siphon_service::StopRecordingRequest;
+using siphon_service::StopRecordingResponse;
 
 // Helper function to parse TOML config and build protobuf request
 bool ParseConfigFile(const std::string &filepath, std::string &processName,
@@ -513,6 +519,125 @@ class SiphonClient {
         return result;
     }
 
+    struct RecordingResult {
+        bool success;
+        std::string message;
+        std::string session_id;
+    };
+
+    RecordingResult StartRecording(const std::vector<std::string> &attributeNames,
+                                   const std::string &outputDirectory, int maxDurationSeconds = 0) {
+        StartRecordingRequest request;
+        StartRecordingResponse response;
+        ClientContext context;
+
+        for (const auto &attr : attributeNames) {
+            request.add_attribute_names(attr);
+        }
+        request.set_output_directory(outputDirectory);
+        request.set_max_duration_seconds(maxDurationSeconds);
+
+        Status status = stub_->StartRecording(&context, request, &response);
+
+        RecordingResult result;
+        if (status.ok()) {
+            result.success = response.success();
+            result.message = response.message();
+            result.session_id = response.session_id();
+        } else {
+            std::cout << "StartRecording RPC failed: " << status.error_message() << std::endl;
+            result.success = false;
+            result.message = "RPC failed: " + status.error_message();
+            result.session_id = "";
+        }
+
+        return result;
+    }
+
+    struct StopRecordingResult {
+        bool success;
+        std::string message;
+        int32_t total_frames;
+        double average_latency_ms;
+        int32_t dropped_frames;
+        double actual_duration_seconds;
+        double actual_fps;
+    };
+
+    StopRecordingResult StopRecording(const std::string &sessionId) {
+        StopRecordingRequest request;
+        StopRecordingResponse response;
+        ClientContext context;
+
+        request.set_session_id(sessionId);
+
+        Status status = stub_->StopRecording(&context, request, &response);
+
+        StopRecordingResult result;
+        if (status.ok()) {
+            result.success = response.success();
+            result.message = response.message();
+            result.total_frames = response.total_frames();
+            result.average_latency_ms = response.average_latency_ms();
+            result.dropped_frames = response.dropped_frames();
+            result.actual_duration_seconds = response.actual_duration_seconds();
+            result.actual_fps = response.actual_fps();
+        } else {
+            std::cout << "StopRecording RPC failed: " << status.error_message() << std::endl;
+            result.success = false;
+            result.message = "RPC failed: " + status.error_message();
+            result.total_frames = 0;
+            result.average_latency_ms = 0.0;
+            result.dropped_frames = 0;
+            result.actual_duration_seconds = 0.0;
+            result.actual_fps = 0.0;
+        }
+
+        return result;
+    }
+
+    struct RecordingStatusResult {
+        bool success;
+        std::string message;
+        bool is_recording;
+        int32_t current_frame;
+        double elapsed_time_seconds;
+        double current_latency_ms;
+        int32_t dropped_frames;
+    };
+
+    RecordingStatusResult GetRecordingStatus(const std::string &sessionId) {
+        GetRecordingStatusRequest request;
+        GetRecordingStatusResponse response;
+        ClientContext context;
+
+        request.set_session_id(sessionId);
+
+        Status status = stub_->GetRecordingStatus(&context, request, &response);
+
+        RecordingStatusResult result;
+        if (status.ok()) {
+            result.success = response.success();
+            result.message = response.message();
+            result.is_recording = response.is_recording();
+            result.current_frame = response.current_frame();
+            result.elapsed_time_seconds = response.elapsed_time_seconds();
+            result.current_latency_ms = response.current_latency_ms();
+            result.dropped_frames = response.dropped_frames();
+        } else {
+            std::cout << "GetRecordingStatus RPC failed: " << status.error_message() << std::endl;
+            result.success = false;
+            result.message = "RPC failed: " + status.error_message();
+            result.is_recording = false;
+            result.current_frame = 0;
+            result.elapsed_time_seconds = 0.0;
+            result.current_latency_ms = 0.0;
+            result.dropped_frames = 0;
+        }
+
+        return result;
+    }
+
   private:
     std::unique_ptr<SiphonService::Stub> stub_;
 };
@@ -577,6 +702,13 @@ int main() {
     std::cout << "  capture <filename>        - Capture frame to BMP file" << std::endl;
     std::cout << "  move <deltaX> <deltaY> <steps> - Move mouse" << std::endl;
     std::cout << "  exec <command> [args...]  - Execute command on server" << std::endl;
+    std::cout << "\n=== Recording Commands ===" << std::endl;
+    std::cout << "  rec-start <output_dir> <attr1,attr2,...> [max_duration_sec]" << std::endl;
+    std::cout << "                            - Start recording (0 = unlimited duration)"
+              << std::endl;
+    std::cout << "  rec-stop <session_id>     - Stop recording session" << std::endl;
+    std::cout << "  rec-status <session_id>   - Get recording status" << std::endl;
+    std::cout << "\n=== General ===" << std::endl;
     std::cout << "  quit                      - Exit client" << std::endl;
 
     std::string command;
@@ -923,6 +1055,149 @@ int main() {
             if (!result.stderr_output.empty()) {
                 std::cout << "  Error Output:" << std::endl;
                 std::cout << result.stderr_output << std::endl;
+            }
+        } else if (command == "rec-start") {
+            std::string outputDir, attributesStr;
+            int maxDuration = 0;
+
+            if (std::cin >> outputDir >> attributesStr) {
+                // Optional max duration parameter
+                if (std::cin.peek() != '\n') {
+                    std::cin >> maxDuration;
+                }
+
+                // Parse comma-separated attributes
+                std::vector<std::string> attributes;
+                std::stringstream ss(attributesStr);
+                std::string attr;
+                while (std::getline(ss, attr, ',')) {
+                    if (!attr.empty()) {
+                        attributes.push_back(attr);
+                    }
+                }
+
+                if (attributes.empty()) {
+                    std::cout << "Error: No attributes specified" << std::endl;
+                    std::cin.clear();
+                    std::cin.ignore(10000, '\n');
+                    continue;
+                }
+
+                std::cout << "Starting recording..." << std::endl;
+                std::cout << "  Output directory: " << outputDir << std::endl;
+                std::cout << "  Attributes: ";
+                for (size_t i = 0; i < attributes.size(); ++i) {
+                    std::cout << attributes[i];
+                    if (i < attributes.size() - 1)
+                        std::cout << ", ";
+                }
+                std::cout << std::endl;
+                std::cout << "  Max duration: "
+                          << (maxDuration == 0 ? "unlimited" : std::to_string(maxDuration) + "s")
+                          << std::endl;
+
+                auto result = client.StartRecording(attributes, outputDir, maxDuration);
+
+                if (result.success) {
+                    std::cout << "\n=== Recording Started! ===" << std::endl;
+                    std::cout << "Session ID: " << result.session_id << std::endl;
+                    std::cout << "Message: " << result.message << std::endl;
+                    std::cout << "\nUse 'rec-status " << result.session_id << "' to check status"
+                              << std::endl;
+                    std::cout << "Use 'rec-stop " << result.session_id << "' to stop recording"
+                              << std::endl;
+                } else {
+                    std::cout << "Failed to start recording: " << result.message << std::endl;
+                }
+            } else {
+                std::cout << "Invalid input. Use: rec-start <output_dir> <attr1,attr2,...> "
+                             "[max_duration_sec]"
+                          << std::endl;
+                std::cin.clear();
+                std::cin.ignore(10000, '\n');
+            }
+        } else if (command == "rec-stop") {
+            std::string sessionId;
+            if (std::cin >> sessionId) {
+                std::cout << "Stopping recording session: " << sessionId << std::endl;
+
+                auto result = client.StopRecording(sessionId);
+
+                if (result.success) {
+                    std::cout << "\n=== Recording Stopped! ===" << std::endl;
+                    std::cout << "Total Frames: " << result.total_frames << std::endl;
+                    std::cout << "Dropped Frames: " << result.dropped_frames << std::endl;
+                    std::cout << "Average Latency: " << std::fixed << std::setprecision(2)
+                              << result.average_latency_ms << "ms" << std::endl;
+                    std::cout << "Message: " << result.message << std::endl;
+
+                    // Display actual stats
+                    if (result.total_frames > 0) {
+                        double dropRate = (result.dropped_frames * 100.0) / result.total_frames;
+                        std::cout << "\nStats:" << std::endl;
+                        std::cout << "  Duration: " << std::fixed << std::setprecision(1)
+                                  << result.actual_duration_seconds << " seconds" << std::endl;
+                        std::cout << "  Actual FPS: " << std::fixed << std::setprecision(1)
+                                  << result.actual_fps << std::endl;
+                        std::cout << "  Drop Rate: " << std::fixed << std::setprecision(2)
+                                  << dropRate << "%" << std::endl;
+
+                        // Show warning if FPS is significantly below 60
+                        if (result.actual_fps < 55.0) {
+                            std::cout << "\n  WARNING: Recording FPS (" << std::fixed
+                                      << std::setprecision(1) << result.actual_fps
+                                      << ") is below target 60fps!" << std::endl;
+                            std::cout << "  Consider reducing resolution, closing other apps, or "
+                                         "checking system performance."
+                                      << std::endl;
+                        }
+                    }
+                } else {
+                    std::cout << "Failed to stop recording: " << result.message << std::endl;
+                }
+            } else {
+                std::cout << "Invalid input. Use: rec-stop <session_id>" << std::endl;
+                std::cin.clear();
+                std::cin.ignore(10000, '\n');
+            }
+        } else if (command == "rec-status") {
+            std::string sessionId;
+            if (std::cin >> sessionId) {
+                auto result = client.GetRecordingStatus(sessionId);
+
+                if (result.success) {
+                    std::cout << "\n=== Recording Status ===" << std::endl;
+                    std::cout << "Session ID: " << sessionId << std::endl;
+                    std::cout << "Status: " << (result.is_recording ? "RECORDING" : "STOPPED")
+                              << std::endl;
+
+                    if (result.is_recording) {
+                        std::cout << "Current Frame: " << result.current_frame << std::endl;
+                        std::cout << "Elapsed Time: " << std::fixed << std::setprecision(1)
+                                  << result.elapsed_time_seconds << "s" << std::endl;
+                        std::cout << "Current Latency: " << std::fixed << std::setprecision(2)
+                                  << result.current_latency_ms << "ms" << std::endl;
+                        std::cout << "Dropped Frames: " << result.dropped_frames << std::endl;
+
+                        // Performance indicator
+                        if (result.current_latency_ms <= 16.67) {
+                            std::cout << "Performance: GOOD (within 60fps budget)" << std::endl;
+                        } else {
+                            std::cout << "Performance: WARNING (exceeding 60fps budget)"
+                                      << std::endl;
+                        }
+
+                        double fps = result.current_frame / result.elapsed_time_seconds;
+                        std::cout << "Average FPS: " << std::fixed << std::setprecision(1) << fps
+                                  << std::endl;
+                    }
+                } else {
+                    std::cout << "Failed to get recording status: " << result.message << std::endl;
+                }
+            } else {
+                std::cout << "Invalid input. Use: rec-status <session_id>" << std::endl;
+                std::cin.clear();
+                std::cin.ignore(10000, '\n');
             }
         } else {
             std::cout << "Unknown command. Type 'quit' to exit or see commands above." << std::endl;
