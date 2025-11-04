@@ -35,6 +35,7 @@ service SiphonService {
   rpc StartRecording(StartRecordingRequest) returns (StartRecordingResponse);
   rpc StopRecording(StopRecordingRequest) returns (StopRecordingResponse);
   rpc GetRecordingStatus(GetRecordingStatusRequest) returns (GetRecordingStatusResponse);
+  rpc DownloadRecording(DownloadRecordingRequest) returns (stream RecordingChunk);
 }
 
 // Request message for getting variable
@@ -267,4 +268,17 @@ message GetRecordingStatusResponse {
   double elapsed_time_seconds = 5;
   double current_latency_ms = 6;
   int32 dropped_frames = 7;
+}
+
+// Download recording
+message DownloadRecordingRequest {
+  string session_id = 1;
+}
+
+message RecordingChunk {
+  bytes data = 1;           // Chunk of file data
+  uint64 offset = 2;        // Offset in file
+  uint64 total_size = 3;    // Total file size
+  bool is_final = 4;        // True for last chunk
+  string filename = 5;      // Filename (e.g., "recording.h5")
 }

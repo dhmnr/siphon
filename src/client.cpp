@@ -19,6 +19,7 @@ using grpc::ClientContext;
 using grpc::Status;
 using siphon_service::CaptureFrameRequest;
 using siphon_service::CaptureFrameResponse;
+using siphon_service::DownloadRecordingRequest;
 using siphon_service::ExecuteCommandRequest;
 using siphon_service::ExecuteCommandResponse;
 using siphon_service::GetRecordingStatusRequest;
@@ -40,6 +41,7 @@ using siphon_service::InputKeyToggleResponse;
 using siphon_service::MoveMouseRequest;
 using siphon_service::MoveMouseResponse;
 using siphon_service::ProcessAttributeProto;
+using siphon_service::RecordingChunk;
 using siphon_service::SetProcessConfigRequest;
 using siphon_service::SetProcessConfigResponse;
 using siphon_service::SetSiphonRequest;
@@ -638,6 +640,65 @@ class SiphonClient {
         return result;
     }
 
+    bool DownloadRecording(const std::string &sessionId, const std::string &outputPath) {
+        DownloadRecordingRequest request;
+        ClientContext context;
+
+        request.set_session_id(sessionId);
+
+        std::unique_ptr<grpc::ClientReader<RecordingChunk>> reader(
+            stub_->DownloadRecording(&context, request));
+
+        // Open output file
+        std::ofstream outFile(outputPath, std::ios::binary);
+        if (!outFile.is_open()) {
+            std::cerr << "Failed to open output file: " << outputPath << std::endl;
+            return false;
+        }
+
+        RecordingChunk chunk;
+        uint64_t totalBytesReceived = 0;
+        uint64_t totalSize = 0;
+        int chunksReceived = 0;
+
+        std::cout << "Downloading recording..." << std::endl;
+
+        while (reader->Read(&chunk)) {
+            // Write chunk data to file
+            outFile.write(reinterpret_cast<const char *>(chunk.data().data()), chunk.data().size());
+
+            totalBytesReceived += chunk.data().size();
+            totalSize = chunk.total_size();
+            chunksReceived++;
+
+            // Show progress
+            if (chunksReceived % 10 == 0 || chunk.is_final()) {
+                double progress = (totalBytesReceived * 100.0) / totalSize;
+                std::cout << "\rProgress: " << std::fixed << std::setprecision(1) << progress
+                          << "% (" << totalBytesReceived << "/" << totalSize << " bytes)"
+                          << std::flush;
+            }
+
+            if (chunk.is_final()) {
+                std::cout << std::endl;
+                break;
+            }
+        }
+
+        outFile.close();
+
+        Status status = reader->Finish();
+        if (status.ok()) {
+            std::cout << "Download complete! Saved to: " << outputPath << std::endl;
+            std::cout << "Total: " << chunksReceived << " chunks, " << totalBytesReceived
+                      << " bytes" << std::endl;
+            return true;
+        } else {
+            std::cerr << "Download failed: " << status.error_message() << std::endl;
+            return false;
+        }
+    }
+
   private:
     std::unique_ptr<SiphonService::Stub> stub_;
 };
@@ -708,6 +769,8 @@ int main() {
               << std::endl;
     std::cout << "  rec-stop <session_id>     - Stop recording session" << std::endl;
     std::cout << "  rec-status <session_id>   - Get recording status" << std::endl;
+    std::cout << "  rec-download <session_id> <output_file>" << std::endl;
+    std::cout << "                            - Download recording HDF5 file" << std::endl;
     std::cout << "\n=== General ===" << std::endl;
     std::cout << "  quit                      - Exit client" << std::endl;
 
@@ -1196,6 +1259,23 @@ int main() {
                 }
             } else {
                 std::cout << "Invalid input. Use: rec-status <session_id>" << std::endl;
+                std::cin.clear();
+                std::cin.ignore(10000, '\n');
+            }
+        } else if (command == "rec-download") {
+            std::string sessionId, outputFile;
+            if (std::cin >> sessionId >> outputFile) {
+                std::cout << "Downloading recording: " << sessionId << std::endl;
+                std::cout << "Output file: " << outputFile << std::endl;
+
+                if (client.DownloadRecording(sessionId, outputFile)) {
+                    std::cout << "Download successful!" << std::endl;
+                } else {
+                    std::cout << "Download failed!" << std::endl;
+                }
+            } else {
+                std::cout << "Invalid input. Use: rec-download <session_id> <output_file>"
+                          << std::endl;
                 std::cin.clear();
                 std::cin.ignore(10000, '\n');
             }

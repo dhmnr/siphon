@@ -1,6 +1,8 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -21,9 +23,12 @@
 using grpc::Server;
 using grpc::ServerBuilder;
 using grpc::ServerContext;
+using grpc::ServerWriter;
 using grpc::Status;
+using grpc::StatusCode;
 using siphon_service::CaptureFrameRequest;
 using siphon_service::CaptureFrameResponse;
+using siphon_service::DownloadRecordingRequest;
 using siphon_service::ExecuteCommandRequest;
 using siphon_service::ExecuteCommandResponse;
 using siphon_service::GetRecordingStatusRequest;
@@ -45,6 +50,7 @@ using siphon_service::InputKeyToggleResponse;
 using siphon_service::MoveMouseRequest;
 using siphon_service::MoveMouseResponse;
 using siphon_service::ProcessAttributeProto;
+using siphon_service::RecordingChunk;
 using siphon_service::SetProcessConfigRequest;
 using siphon_service::SetProcessConfigResponse;
 using siphon_service::SetSiphonRequest;
@@ -671,6 +677,76 @@ class SiphonServiceImpl final : public SiphonService::Service {
             response->set_success(false);
             response->set_message("Failed to get recording status");
         }
+
+        return Status::OK;
+    }
+
+    Status DownloadRecording(ServerContext *context, const DownloadRecordingRequest *request,
+                             ServerWriter<RecordingChunk> *writer) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        // Build path to recording file
+        std::string sessionId = request->session_id();
+        if (sessionId.empty()) {
+            return Status(StatusCode::INVALID_ARGUMENT, "Session ID is required");
+        }
+
+        // Find the recording file (assume it's in recordings/<session_id>/recording.h5)
+        std::filesystem::path recordingPath =
+            std::filesystem::current_path() / "recordings" / sessionId / "recording.h5";
+
+        if (!std::filesystem::exists(recordingPath)) {
+            spdlog::error("Recording file not found: {}", recordingPath.string());
+            return Status(StatusCode::NOT_FOUND,
+                          "Recording file not found for session: " + sessionId);
+        }
+
+        // Open file for binary reading
+        std::ifstream file(recordingPath, std::ios::binary | std::ios::ate);
+        if (!file.is_open()) {
+            spdlog::error("Failed to open recording file: {}", recordingPath.string());
+            return Status(StatusCode::INTERNAL, "Failed to open recording file");
+        }
+
+        // Get file size
+        uint64_t totalSize = file.tellg();
+        file.seekg(0, std::ios::beg);
+
+        spdlog::info("Starting download of recording: {} ({} bytes)", sessionId, totalSize);
+
+        // Stream file in chunks
+        const size_t chunkSize = 1024 * 1024; // 1MB chunks
+        std::vector<uint8_t> buffer(chunkSize);
+        uint64_t offset = 0;
+        size_t chunksWritten = 0;
+
+        while (file.read(reinterpret_cast<char *>(buffer.data()), chunkSize) || file.gcount() > 0) {
+            RecordingChunk chunk;
+            size_t bytesRead = file.gcount();
+
+            chunk.set_data(buffer.data(), bytesRead);
+            chunk.set_offset(offset);
+            chunk.set_total_size(totalSize);
+            chunk.set_is_final(file.eof());
+            chunk.set_filename("recording.h5");
+
+            if (!writer->Write(chunk)) {
+                spdlog::error("Failed to write chunk at offset {}", offset);
+                return Status(StatusCode::INTERNAL, "Failed to stream chunk");
+            }
+
+            offset += bytesRead;
+            chunksWritten++;
+
+            // Log progress every 10 chunks (10MB)
+            if (chunksWritten % 10 == 0) {
+                double progress = (offset * 100.0) / totalSize;
+                spdlog::info("Download progress: {:.1f}% ({}/{})", progress, offset, totalSize);
+            }
+        }
+
+        file.close();
+        spdlog::info("Download complete: {} chunks, {} bytes", chunksWritten, totalSize);
 
         return Status::OK;
     }
