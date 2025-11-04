@@ -1,5 +1,6 @@
 #pragma once
 
+#include "h5_recording_writer.h"
 #include "interception.h"
 #include "process_attribute.h"
 #include "process_capture.h"
@@ -77,20 +78,14 @@ class ProcessRecorder {
     std::atomic<bool> hooksReady_;
     static ProcessRecorder *instance_; // For static hook callback
 
-    // Metadata buffer for writing
-    std::vector<FrameData> frameDataBuffer_;
-    std::mutex bufferMutex_;
+    // HDF5 async writer
+    std::unique_ptr<H5RecordingWriter> h5Writer_;
 
     // Private methods
     void RecordingLoop();
     void HookMessageLoop();
     static LRESULT CALLBACK KeyboardHookProc(int nCode, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK MouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
-    bool CaptureFrame(FrameData &frameData);
-    bool ReadMemoryAttributes(FrameData &frameData);
-    bool CaptureKeystrokes(FrameData &frameData);
-    bool WriteFrameToDisk(const std::vector<uint8_t> &pixels, int frameNumber);
-    bool WriteMetadataToFile();
     std::string GenerateSessionId();
     bool CreateOutputDirectories();
     std::vector<std::string> GetCurrentKeysPressed();

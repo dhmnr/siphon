@@ -44,7 +44,7 @@ ProcessRecorder::~ProcessRecorder() {
         UnhookWindowsHookEx(keyboardHook_);
         keyboardHook_ = nullptr;
     }
-    
+
     if (mouseHook_) {
         UnhookWindowsHookEx(mouseHook_);
         mouseHook_ = nullptr;
@@ -55,7 +55,7 @@ ProcessRecorder::~ProcessRecorder() {
         PostThreadMessage(GetThreadId(hookThread_.native_handle()), WM_QUIT, 0, 0);
         hookThread_.join();
     }
-    
+
     if (instance_ == this) {
         instance_ = nullptr;
     }
@@ -130,7 +130,6 @@ bool ProcessRecorder::StartRecording(const std::vector<std::string> &attributeNa
     currentFrame_ = 0;
     droppedFrames_ = 0;
     currentLatencyMs_ = 0.0;
-    frameDataBuffer_.clear();
 
     stats_.totalFrames = 0;
     stats_.droppedFrames = 0;
@@ -140,6 +139,19 @@ bool ProcessRecorder::StartRecording(const std::vector<std::string> &attributeNa
     stats_.startTimeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                              std::chrono::system_clock::now().time_since_epoch())
                              .count();
+
+    // Initialize HDF5 writer
+    try {
+        std::string h5Path = (fs::path(outputDirectory_) / sessionId_ / "recording.h5").string();
+        int width = capture_->processWindowWidth;
+        int height = capture_->processWindowHeight;
+        h5Writer_ =
+            std::make_unique<H5RecordingWriter>(h5Path, width, height, attributeNames_, 120);
+        spdlog::info("Initialized HDF5 writer: {}", h5Path);
+    } catch (const std::exception &e) {
+        spdlog::error("Failed to initialize HDF5 writer: {}", e.what());
+        return false;
+    }
 
     // Start hook thread (must have message loop for hooks to work)
     hooksReady_ = false;
@@ -195,8 +207,13 @@ bool ProcessRecorder::StopRecording(RecordingStats &stats) {
         hookThread_.join();
     }
 
-    // Write metadata to file
-    WriteMetadataToFile();
+    // Finalize HDF5 writer (waits for queue to drain)
+    if (h5Writer_) {
+        spdlog::info("Finalizing HDF5 writer - queue size: {}", h5Writer_->GetQueueSize());
+        h5Writer_->Finalize();
+        spdlog::info("HDF5 finalized - frames written: {}", h5Writer_->GetFramesWritten());
+        h5Writer_.reset();
+    }
 
     // Update final statistics
     stats_.endTimeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -208,15 +225,6 @@ bool ProcessRecorder::StopRecording(RecordingStats &stats) {
     // Calculate actual duration and FPS
     stats_.actualDurationSeconds = (stats_.endTimeMs - stats_.startTimeMs) / 1000.0;
     stats_.actualFps = stats_.totalFrames / stats_.actualDurationSeconds;
-
-    // Calculate average latency
-    if (!frameDataBuffer_.empty()) {
-        double totalLatency = 0.0;
-        for (const auto &frame : frameDataBuffer_) {
-            totalLatency += frame.totalMs;
-        }
-        stats_.averageLatencyMs = totalLatency / frameDataBuffer_.size();
-    }
 
     stats = stats_;
 
@@ -434,15 +442,15 @@ LRESULT CALLBACK ProcessRecorder::MouseHookProc(int nCode, WPARAM wParam, LPARAM
             if (isPress) {
                 // Button pressed
                 if (std::find(instance_->currentKeysPressed_.begin(),
-                             instance_->currentKeysPressed_.end(),
-                             buttonName) == instance_->currentKeysPressed_.end()) {
+                              instance_->currentKeysPressed_.end(),
+                              buttonName) == instance_->currentKeysPressed_.end()) {
                     instance_->currentKeysPressed_.push_back(buttonName);
                 }
             } else {
                 // Button released
                 instance_->currentKeysPressed_.erase(
                     std::remove(instance_->currentKeysPressed_.begin(),
-                               instance_->currentKeysPressed_.end(), buttonName),
+                                instance_->currentKeysPressed_.end(), buttonName),
                     instance_->currentKeysPressed_.end());
             }
         }
@@ -537,64 +545,90 @@ void ProcessRecorder::RecordingLoop() {
             continue;
         }
 
-        FrameData frameData;
+        H5FrameData frameData;
         frameData.frameNumber = currentFrame_;
         frameData.timestampMs =
             std::chrono::duration_cast<std::chrono::milliseconds>(wallClockTime.time_since_epoch())
                 .count();
+        frameData.width = capture_->processWindowWidth;
+        frameData.height = capture_->processWindowHeight;
 
         // Capture frame
         auto captureStart = std::chrono::high_resolution_clock::now();
-        std::vector<uint8_t> pixels = capture_->GetPixelData();
+        frameData.pixels = capture_->GetPixelData();
         auto captureEnd = std::chrono::high_resolution_clock::now();
         frameData.frameCaptureMs =
             std::chrono::duration<double, std::milli>(captureEnd - captureStart).count();
 
         // Read memory attributes
         auto memoryStart = std::chrono::high_resolution_clock::now();
-        ReadMemoryAttributes(frameData);
+        for (const auto &attrName : attributeNames_) {
+            try {
+                ProcessAttribute attr = memory_->GetAttribute(attrName);
+                std::string value;
+
+                if (attr.AttributeType == "int") {
+                    int32_t intVal = 0;
+                    if (memory_->ExtractAttributeInt(attrName, intVal)) {
+                        value = std::to_string(intVal);
+                    }
+                } else if (attr.AttributeType == "float") {
+                    float floatVal = 0.0f;
+                    if (memory_->ExtractAttributeFloat(attrName, floatVal)) {
+                        value = std::to_string(floatVal);
+                    }
+                } else {
+                    value = "0";
+                }
+
+                frameData.memoryData[attrName] = value;
+            } catch (const std::exception &e) {
+                frameData.memoryData[attrName] = "0";
+            }
+        }
         auto memoryEnd = std::chrono::high_resolution_clock::now();
         frameData.memoryReadMs =
             std::chrono::duration<double, std::milli>(memoryEnd - memoryStart).count();
 
-        // Capture keystrokes
+        // Capture keystrokes (snapshot current keys)
         auto keystrokeStart = std::chrono::high_resolution_clock::now();
-        CaptureKeystrokes(frameData);
+        frameData.keysPressed = GetCurrentKeysPressed();
         auto keystrokeEnd = std::chrono::high_resolution_clock::now();
         frameData.keystrokeCaptureMs =
             std::chrono::duration<double, std::milli>(keystrokeEnd - keystrokeStart).count();
 
-        // Write frame to disk
-        auto diskStart = std::chrono::high_resolution_clock::now();
-        WriteFrameToDisk(pixels, frameData.frameNumber);
-        auto diskEnd = std::chrono::high_resolution_clock::now();
-        frameData.diskWriteMs =
-            std::chrono::duration<double, std::milli>(diskEnd - diskStart).count();
-
+        // Calculate queue timing before moving frameData
+        auto queueStart = std::chrono::high_resolution_clock::now();
         auto frameEndTime = std::chrono::high_resolution_clock::now();
-        frameData.totalMs =
+        double totalMs =
             std::chrono::duration<double, std::milli>(frameEndTime - frameStartTime).count();
 
-        // Update statistics
-        currentLatencyMs_ = frameData.totalMs;
-        if (frameData.totalMs > stats_.maxLatencyMs) {
-            stats_.maxLatencyMs = frameData.totalMs;
-        }
-        if (frameData.totalMs < stats_.minLatencyMs) {
-            stats_.minLatencyMs = frameData.totalMs;
+        frameData.diskWriteMs = std::chrono::duration<double, std::milli>(queueStart - queueStart)
+                                    .count(); // Queue is instant
+        frameData.totalLatencyMs = totalMs;
+
+        // Queue frame for async HDF5 writing (non-blocking)
+        if (h5Writer_) {
+            h5Writer_->QueueFrame(std::move(frameData));
         }
 
-        // Store frame data for metadata
-        {
-            std::lock_guard<std::mutex> lock(bufferMutex_);
-            frameDataBuffer_.push_back(frameData);
+        // Update statistics
+        currentLatencyMs_ = totalMs;
+        if (totalMs > stats_.maxLatencyMs) {
+            stats_.maxLatencyMs = totalMs;
         }
+        if (totalMs < stats_.minLatencyMs) {
+            stats_.minLatencyMs = totalMs;
+        }
+
+        // Accumulate average latency
+        stats_.averageLatencyMs =
+            (stats_.averageLatencyMs * currentFrame_ + totalMs) / (currentFrame_ + 1);
 
         // Check if we exceeded frame time budget
-        if (frameData.totalMs > 16.67) {
+        if (totalMs > 16.67) {
             droppedFrames_++;
-            spdlog::warn("Frame {} exceeded time budget: {:.2f}ms", frameData.frameNumber,
-                         frameData.totalMs);
+            spdlog::warn("Frame {} exceeded time budget: {:.2f}ms", frameData.frameNumber, totalMs);
         }
 
         currentFrame_++;
@@ -608,8 +642,8 @@ void ProcessRecorder::RecordingLoop() {
                            stats_.startTimeMs;
             double actualFps = (currentFrame_ * 1000.0) / elapsed;
             spdlog::info("Frame {}: {:.2f}ms (capture: {:.2f}ms, memory: {:.2f}ms, keys: "
-                         "{:.2f}ms, disk: {:.2f}ms) - FPS: {:.1f}",
-                         frameData.frameNumber, frameData.totalMs, frameData.frameCaptureMs,
+                         "{:.2f}ms, queue: {:.2f}ms) - FPS: {:.1f}",
+                         frameData.frameNumber, totalMs, frameData.frameCaptureMs,
                          frameData.memoryReadMs, frameData.keystrokeCaptureMs,
                          frameData.diskWriteMs, actualFps);
         }
@@ -619,160 +653,4 @@ void ProcessRecorder::RecordingLoop() {
 
     spdlog::info("Recording loop stopped");
 }
-
-bool ProcessRecorder::ReadMemoryAttributes(FrameData &frameData) {
-    if (!memory_) {
-        return false;
-    }
-
-    for (const auto &attrName : attributeNames_) {
-        try {
-            ProcessAttribute attr = memory_->GetAttribute(attrName);
-
-            if (attr.AttributeType == "int") {
-                int32_t value = 0;
-                if (memory_->ExtractAttributeInt(attrName, value)) {
-                    frameData.memoryData[attrName] = std::to_string(value);
-                }
-            } else if (attr.AttributeType == "float") {
-                float value = 0.0f;
-                if (memory_->ExtractAttributeFloat(attrName, value)) {
-                    frameData.memoryData[attrName] = std::to_string(value);
-                }
-            } else if (attr.AttributeType == "array") {
-                std::vector<uint8_t> value(attr.AttributeLength);
-                if (memory_->ExtractAttributeArray(attrName, value)) {
-                    // Convert array to hex string
-                    std::stringstream ss;
-                    ss << "[";
-                    for (size_t i = 0; i < value.size(); ++i) {
-                        if (i > 0)
-                            ss << ",";
-                        ss << static_cast<int>(value[i]);
-                    }
-                    ss << "]";
-                    frameData.memoryData[attrName] = ss.str();
-                }
-            } else if (attr.AttributeType == "bool") {
-                std::vector<uint8_t> value(1);
-                if (memory_->ExtractAttributeArray(attrName, value)) {
-                    frameData.memoryData[attrName] = value[0] ? "true" : "false";
-                }
-            }
-        } catch (const std::exception &e) {
-            spdlog::error("Failed to read attribute {}: {}", attrName, e.what());
-        }
-    }
-
-    return true;
-}
-
-bool ProcessRecorder::CaptureKeystrokes(FrameData &frameData) {
-    frameData.keysPressed = GetCurrentKeysPressed();
-    return true;
-}
-
-bool ProcessRecorder::WriteFrameToDisk(const std::vector<uint8_t> &pixels, int frameNumber) {
-    if (pixels.empty()) {
-        spdlog::error("Cannot write empty frame {}", frameNumber);
-        return false;
-    }
-
-    try {
-        // Build path: outputDirectory/sessionId/frames/frame_NNNNNN.bmp
-        fs::path framesPath = fs::path(outputDirectory_) / sessionId_ / "frames";
-
-        std::stringstream filename;
-        filename << "frame_" << std::setw(6) << std::setfill('0') << frameNumber << ".bmp";
-        fs::path framePath = framesPath / filename.str();
-
-        // Use ProcessCapture's SaveBMP function
-        return capture_->SaveBMP(pixels, framePath.string().c_str());
-
-    } catch (const std::exception &e) {
-        spdlog::error("Failed to write frame {} to disk: {}", frameNumber, e.what());
-        return false;
-    }
-}
-
-bool ProcessRecorder::WriteMetadataToFile() {
-    try {
-        // Build path: outputDirectory/sessionId/metadata.json
-        fs::path metadataPath = fs::path(outputDirectory_) / sessionId_ / "metadata.json";
-        std::ofstream outFile(metadataPath);
-
-        if (!outFile.is_open()) {
-            spdlog::error("Failed to open metadata file for writing");
-            return false;
-        }
-
-        outFile << "{\n";
-        outFile << "  \"session_id\": \"" << sessionId_ << "\",\n";
-        outFile << "  \"start_time_ms\": " << stats_.startTimeMs << ",\n";
-        outFile << "  \"end_time_ms\": " << stats_.endTimeMs << ",\n";
-        outFile << "  \"total_frames\": " << stats_.totalFrames << ",\n";
-        outFile << "  \"dropped_frames\": " << stats_.droppedFrames << ",\n";
-        outFile << "  \"actual_duration_seconds\": " << stats_.actualDurationSeconds << ",\n";
-        outFile << "  \"actual_fps\": " << stats_.actualFps << ",\n";
-        outFile << "  \"average_latency_ms\": " << stats_.averageLatencyMs << ",\n";
-        outFile << "  \"max_latency_ms\": " << stats_.maxLatencyMs << ",\n";
-        outFile << "  \"min_latency_ms\": " << stats_.minLatencyMs << ",\n";
-        outFile << "  \"frames\": [\n";
-
-        std::lock_guard<std::mutex> lock(bufferMutex_);
-        for (size_t i = 0; i < frameDataBuffer_.size(); ++i) {
-            const auto &frame = frameDataBuffer_[i];
-
-            outFile << "    {\n";
-            outFile << "      \"frame\": " << frame.frameNumber << ",\n";
-            outFile << "      \"timestamp_ms\": " << frame.timestampMs << ",\n";
-
-            // Memory data
-            outFile << "      \"memory_data\": {\n";
-            size_t memIdx = 0;
-            for (const auto &pair : frame.memoryData) {
-                outFile << "        \"" << pair.first << "\": \"" << pair.second << "\"";
-                if (memIdx < frame.memoryData.size() - 1)
-                    outFile << ",";
-                outFile << "\n";
-                memIdx++;
-            }
-            outFile << "      },\n";
-
-            // Keys pressed
-            outFile << "      \"keys_pressed\": [";
-            for (size_t j = 0; j < frame.keysPressed.size(); ++j) {
-                outFile << "\"" << frame.keysPressed[j] << "\"";
-                if (j < frame.keysPressed.size() - 1)
-                    outFile << ", ";
-            }
-            outFile << "],\n";
-
-            // Latency
-            outFile << "      \"latency_ms\": {\n";
-            outFile << "        \"frame_capture\": " << frame.frameCaptureMs << ",\n";
-            outFile << "        \"memory_read\": " << frame.memoryReadMs << ",\n";
-            outFile << "        \"keystroke_capture\": " << frame.keystrokeCaptureMs << ",\n";
-            outFile << "        \"disk_write\": " << frame.diskWriteMs << ",\n";
-            outFile << "        \"total\": " << frame.totalMs << "\n";
-            outFile << "      }\n";
-
-            outFile << "    }";
-            if (i < frameDataBuffer_.size() - 1)
-                outFile << ",";
-            outFile << "\n";
-        }
-
-        outFile << "  ]\n";
-        outFile << "}\n";
-
-        outFile.close();
-
-        spdlog::info("Metadata written to: {}", metadataPath.string());
-        return true;
-
-    } catch (const std::exception &e) {
-        spdlog::error("Failed to write metadata file: {}", e.what());
-        return false;
-    }
-}
+// Old methods removed - now using H5RecordingWriter for async HDF5 storage

@@ -17,6 +17,7 @@ find_package(gRPC REQUIRED)
 find_package(tomlplusplus CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(CLI11 CONFIG REQUIRED)
+find_package(HDF5 REQUIRED COMPONENTS CXX HL)
 
 
 # Generate protobuf and gRPC files
@@ -68,6 +69,7 @@ include_directories(${gRPC_INCLUDE_DIRS})
 include_directories(${tomlplusplus_INCLUDE_DIRS})
 include_directories(${spdlog_INCLUDE_DIRS})
 include_directories(${CLI11_INCLUDE_DIRS})
+include_directories(${HDF5_INCLUDE_DIRS})
 include_directories(${INTERCEPTION_SDK_PATH}/include)
 
 # Server executable
@@ -80,6 +82,7 @@ add_executable(siphon
     src/process_capture.cpp
     src/process_attribute.cpp
     src/process_recorder.cpp
+    src/h5_recording_writer.cpp
     include/dll_injector.h
     include/shared_memory.h
     ${PROTO_SRCS}
@@ -100,6 +103,8 @@ target_link_libraries(siphon
     tomlplusplus::tomlplusplus
     spdlog::spdlog
     CLI11::CLI11
+    hdf5::hdf5_cpp
+    hdf5::hdf5_hl_cpp
 )
 
 # Link Interception library
