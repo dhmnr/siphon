@@ -4,6 +4,7 @@
 #include <cstring>
 #include <iostream>
 #include <map>
+#include <set>
 #include <sstream>
 #include <thread>
 #include <windows.h>
@@ -111,6 +112,12 @@ std::map<std::string, unsigned short> scancodeMap = {
     {"KEYPAD_PLUS", 0x4E},   // +
     {"KEYPAD_MINUS", 0x4A},  // -
     {"KEYPAD_PERIOD", 0x53}, // .
+
+    // Arrow Keys
+    {"UP", 0x48},
+    {"DOWN", 0x50},
+    {"LEFT", 0x4B},
+    {"RIGHT", 0x4D},
 };
 
 // Mouse button definitions
@@ -128,6 +135,13 @@ std::map<std::string, unsigned short> mouseButtonReleaseMap = {
     {"MIDDLE", INTERCEPTION_MOUSE_MIDDLE_BUTTON_UP}, // 0x020
     {"BUTTON4", INTERCEPTION_MOUSE_BUTTON_4_UP},     // 0x080
     {"BUTTON5", INTERCEPTION_MOUSE_BUTTON_5_UP},     // 0x200
+};
+
+std::set<std::string> e0Keys = {
+    "UP",
+    "DOWN",
+    "LEFT",
+    "RIGHT",
 };
 
 ProcessInput::ProcessInput() : context(nullptr), keyboard(0) {}
@@ -198,6 +212,12 @@ void ProcessInput::PressKey(std::string key) {
     InterceptionKeyStroke stroke;
     stroke.code = scancodeMap[key];
     stroke.state = INTERCEPTION_KEY_DOWN;
+
+    // Set E0 flag for extended keys
+    if (e0Keys.count(key)) {
+        stroke.state |= INTERCEPTION_KEY_E0; // 0x02
+    }
+
     stroke.information = 0;
     spdlog::info("Interception: Pressing key: {}", key);
     interception_send(context, keyboard, (InterceptionStroke *)&stroke, 1);
@@ -213,6 +233,12 @@ void ProcessInput::ReleaseKey(std::string key) {
     InterceptionKeyStroke stroke;
     stroke.code = scancodeMap[key];
     stroke.state = INTERCEPTION_KEY_UP;
+
+    // Set E0 flag for extended keys
+    if (e0Keys.count(key)) {
+        stroke.state |= INTERCEPTION_KEY_E0; // 0x02
+    }
+
     stroke.information = 0;
     spdlog::info("Interception: Releasing key: {}", key);
     interception_send(context, keyboard, (InterceptionStroke *)&stroke, 1);
