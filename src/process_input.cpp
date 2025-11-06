@@ -114,10 +114,10 @@ std::map<std::string, unsigned short> scancodeMap = {
     {"KEYPAD_PERIOD", 0x53}, // .
 
     // Arrow Keys
-    {"UP", 0x48},
-    {"DOWN", 0x50},
-    {"LEFT", 0x4B},
-    {"RIGHT", 0x4D},
+    {"UP_ARROW", 0x48},
+    {"DOWN_ARROW", 0x50},
+    {"LEFT_ARROW", 0x4B},
+    {"RIGHT_ARROW", 0x4D},
 };
 
 // Mouse button definitions
@@ -138,10 +138,10 @@ std::map<std::string, unsigned short> mouseButtonReleaseMap = {
 };
 
 std::set<std::string> e0Keys = {
-    "UP",
-    "DOWN",
-    "LEFT",
-    "RIGHT",
+    "UP_ARROW",
+    "DOWN_ARROW",
+    "LEFT_ARROW",
+    "RIGHT_ARROW",
 };
 
 ProcessInput::ProcessInput() : context(nullptr), keyboard(0) {}
