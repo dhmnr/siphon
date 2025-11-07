@@ -748,6 +748,26 @@ class SiphonServiceImpl final : public SiphonService::Service {
         file.close();
         spdlog::info("Download complete: {} chunks, {} bytes", chunksWritten, totalSize);
 
+        // Delete the recording file after successful download
+        try {
+            std::filesystem::path sessionDir = recordingPath.parent_path();
+
+            // Delete the recording file
+            if (std::filesystem::remove(recordingPath)) {
+                spdlog::info("Deleted recording file: {}", recordingPath.string());
+            }
+
+            // Try to remove the session directory if it's empty
+            if (std::filesystem::is_empty(sessionDir)) {
+                if (std::filesystem::remove(sessionDir)) {
+                    spdlog::info("Deleted empty session directory: {}", sessionDir.string());
+                }
+            }
+        } catch (const std::exception &e) {
+            spdlog::warn("Failed to cleanup recording files: {}", e.what());
+            // Don't fail the RPC - download was successful
+        }
+
         return Status::OK;
     }
 };
