@@ -36,7 +36,7 @@ bool VideoEncoder::Initialize(const std::string &outputPath, int width, int heig
     encoderThread_ = std::thread(&VideoEncoder::EncoderThread, this);
 
     spdlog::info("VideoEncoder initialized: {}", outputPath_);
-    spdlog::info("Resolution: {}x{}, Codec: H.264 (variable FPS)", width_, height_);
+    spdlog::info("Resolution: {}x{}, Codec: H.264 CRF-20 (~15fps)", width_, height_);
 
     return true;
 }
@@ -77,14 +77,12 @@ bool VideoEncoder::InitializeFFmpeg() {
         codecContext_->time_base = AVRational{1, 1000000}; // Microsecond time base
         codecContext_->framerate = AVRational{0, 1};       // Variable framerate
         codecContext_->pix_fmt = AV_PIX_FMT_YUV420P;
-        codecContext_->bit_rate = 10000000; // 10 Mbps bitrate
-        codecContext_->gop_size = 60;       // Keyframe every ~1 second
+        codecContext_->bit_rate = 8000000; // 8 Mbps bitrate
+        codecContext_->gop_size = 60;      // Keyframe every ~1 second
 
-        // H.264 settings for high quality
-        av_opt_set(codecContext_->priv_data, "preset", "medium", 0);
-        av_opt_set(codecContext_->priv_data, "crf", "18",
-                   0); // High quality (0-51, lower is better)
-        av_opt_set(codecContext_->priv_data, "tune", "zerolatency", 0);
+        // H.264 settings optimized for 15fps recording
+        av_opt_set(codecContext_->priv_data, "preset", "veryfast", 0); // Fast encoding
+        av_opt_set(codecContext_->priv_data, "crf", "20", 0);          // Good quality
 
         // Some formats require global headers
         if (formatContext_->oformat->flags & AVFMT_GLOBALHEADER) {
@@ -158,7 +156,7 @@ bool VideoEncoder::InitializeFFmpeg() {
             return false;
         }
 
-        spdlog::info("FFmpeg initialized successfully with H.264 codec (variable FPS)");
+        spdlog::info("FFmpeg initialized successfully with H.264 CRF-20 codec (~15fps)");
         return true;
 
     } catch (const std::exception &e) {

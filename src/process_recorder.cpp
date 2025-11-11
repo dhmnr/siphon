@@ -356,9 +356,10 @@ void ProcessRecorder::RecordingLoop() {
     } else {
         spdlog::info("==> Using Windows Graphics Capture (event-based fallback)");
     }
-    spdlog::info("Recording loop started - Capturing at game framerate");
+    spdlog::info("Recording loop started - Capturing every 4th frame (~15fps)");
 
     auto lastFrameTime = std::chrono::high_resolution_clock::now();
+    int loopCounter = 0; // Track all loop iterations
 
     while (!shouldStop_) {
         auto frameStartTime = std::chrono::high_resolution_clock::now();
@@ -381,6 +382,13 @@ void ProcessRecorder::RecordingLoop() {
         while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
+        }
+
+        // Skip frames - only capture every 4th frame for ~15fps
+        loopCounter++;
+        if (loopCounter % 4 != 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1)); // Small sleep
+            continue;
         }
 
         int64_t timestampUs =
@@ -436,8 +444,8 @@ void ProcessRecorder::RecordingLoop() {
         stats_.averageLatencyMs =
             (stats_.averageLatencyMs * currentFrame_ + totalMs) / (currentFrame_ + 1);
 
-        // Check if we exceeded frame time budget (60fps = 16.67ms)
-        if (totalMs > 16.67) {
+        // Check if we exceeded frame time budget (15fps = 66.67ms)
+        if (totalMs > 66.67) {
             droppedFrames_++;
         }
 
