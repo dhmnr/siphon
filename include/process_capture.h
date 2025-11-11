@@ -38,11 +38,11 @@ class ProcessCapture {
 
     ComPtr<ID3D11Texture2D> latestFrame;
     std::mutex frameMutex;
-    HWND processWindow;
     uint64_t frameCounter;
     uint64_t lastReadFrameCounter;
 
   public:
+    HWND processWindow;
     int processWindowWidth;
     int processWindowHeight;
     ProcessCapture();

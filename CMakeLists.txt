@@ -18,6 +18,7 @@ find_package(tomlplusplus CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(CLI11 CONFIG REQUIRED)
 find_package(HDF5 REQUIRED COMPONENTS CXX HL)
+find_package(ffmpeg REQUIRED)
 
 
 # Generate protobuf and gRPC files
@@ -83,6 +84,8 @@ add_executable(siphon
     src/process_attribute.cpp
     src/process_recorder.cpp
     src/h5_recording_writer.cpp
+    src/input_event_logger.cpp
+    src/video_encoder.cpp
     include/dll_injector.h
     include/shared_memory.h
     ${PROTO_SRCS}
@@ -98,6 +101,8 @@ target_include_directories(siphon PRIVATE include)
 target_link_libraries(siphon 
     psapi 
     user32 
+    d3d11
+    dxgi
     gRPC::grpc++ 
     protobuf::libprotobuf
     tomlplusplus::tomlplusplus
@@ -105,6 +110,10 @@ target_link_libraries(siphon
     CLI11::CLI11
     hdf5::hdf5_cpp
     hdf5::hdf5_hl_cpp
+    ffmpeg::avcodec
+    ffmpeg::avformat
+    ffmpeg::avutil
+    ffmpeg::swscale
 )
 
 # Link Interception library

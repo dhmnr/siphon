@@ -1,13 +1,17 @@
 #pragma once
 
-#include "h5_recording_writer.h"
+#include "input_event_logger.h"
 #include "interception.h"
 #include "process_attribute.h"
 #include "process_capture.h"
 #include "process_input.h"
 #include "process_memory.h"
+#include "video_encoder.h"
 #include <atomic>
 #include <chrono>
+#include <d3d11.h>
+#include <dxgi1_2.h>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -15,20 +19,14 @@
 #include <thread>
 #include <vector>
 #include <windows.h>
+#include <wrl/client.h>
 
-// Structure to hold per-frame recording data
-struct FrameData {
-    int frameNumber;
-    int64_t timestampMs;
-    std::map<std::string, std::string> memoryData; // attribute name -> value as string
-    std::vector<std::string> keysPressed;
+using Microsoft::WRL::ComPtr;
 
-    // Latency measurements in milliseconds
-    double frameCaptureMs;
-    double memoryReadMs;
-    double keystrokeCaptureMs;
-    double diskWriteMs;
-    double totalMs;
+// Structure for memory data per frame
+struct MemoryFrameData {
+    int64_t timestampUs;
+    std::map<std::string, std::string> memoryData;
 };
 
 // Recording session statistics
@@ -55,7 +53,7 @@ class ProcessRecorder {
     std::atomic<bool> isRecording_;
     std::atomic<bool> shouldStop_;
     std::thread recordingThread_;
-    std::thread hookThread_;
+    std::thread memoryThread_;
 
     // Configuration
     std::vector<std::string> attributeNames_;
@@ -70,26 +68,42 @@ class ProcessRecorder {
     RecordingStats stats_;
     std::mutex statsMutex_;
 
-    // Keystroke and mouse monitoring
-    std::vector<std::string> currentKeysPressed_;
-    std::mutex keystrokeMutex_;
-    HHOOK keyboardHook_;
-    HHOOK mouseHook_;
-    std::atomic<bool> hooksReady_;
-    static ProcessRecorder *instance_; // For static hook callback
+    // Video encoder (lossless)
+    std::unique_ptr<VideoEncoder> videoEncoder_;
 
-    // HDF5 async writer
-    std::unique_ptr<H5RecordingWriter> h5Writer_;
+    // Input event logger (runs independently)
+    std::unique_ptr<InputEventLogger> inputLogger_;
+
+    // Memory data CSV writer
+    std::ofstream memoryFile_;
+    std::mutex memoryMutex_;
+
+    // Performance data CSV writer
+    std::ofstream perfFile_;
+    std::mutex perfMutex_;
+
+    // DXGI Desktop Duplication for recording
+    ComPtr<ID3D11Device> d3dDevice_;
+    ComPtr<ID3D11DeviceContext> d3dContext_;
+    ComPtr<IDXGIOutputDuplication> dxgiDuplication_;
+    ComPtr<ID3D11Texture2D> stagingTexture_;
+    int captureWidth_;
+    int captureHeight_;
+    HWND targetWindow_;
 
     // Private methods
     void RecordingLoop();
-    void HookMessageLoop();
-    static LRESULT CALLBACK KeyboardHookProc(int nCode, WPARAM wParam, LPARAM lParam);
-    static LRESULT CALLBACK MouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+    void MemoryReadingLoop();
+    void WriteMemoryHeader();
+    void WriteMemoryFrame(const MemoryFrameData &data);
+    void WritePerfHeader();
+    void WritePerfData(int frame, int64_t timestampUs, double totalMs, double captureMs, double fps,
+                       size_t queueSize, int dropped);
     std::string GenerateSessionId();
     bool CreateOutputDirectories();
-    std::vector<std::string> GetCurrentKeysPressed();
-    std::string VirtualKeyToString(DWORD vkCode);
+    bool InitializeDXGICapture(HWND window);
+    void CleanupDXGICapture();
+    std::vector<uint8_t> CaptureFrameDXGI();
 
   public:
     ProcessRecorder(ProcessCapture *capture, ProcessMemory *memory, ProcessInput *input);

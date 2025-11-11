@@ -2,13 +2,13 @@
 
 #include <H5Cpp.h>
 #include <atomic>
+#include <condition_variable>
 #include <map>
 #include <mutex>
 #include <queue>
 #include <string>
 #include <thread>
 #include <vector>
-#include <condition_variable>
 
 // Bounded queue for async frame buffering
 template <typename T> class BoundedQueue {
@@ -19,32 +19,28 @@ template <typename T> class BoundedQueue {
 
     void push(T item) {
         std::unique_lock<std::mutex> lock(mutex_);
-        
+
         // Wait if queue is full
-        cvNotFull_.wait(lock, [this] { 
-            return queue_.size() < maxSize_ || stopped_; 
-        });
-        
+        cvNotFull_.wait(lock, [this] { return queue_.size() < maxSize_ || stopped_; });
+
         if (stopped_) {
             return;
         }
-        
+
         queue_.push(std::move(item));
         cvNotEmpty_.notify_one();
     }
 
     bool pop(T &item) {
         std::unique_lock<std::mutex> lock(mutex_);
-        
+
         // Wait if queue is empty
-        cvNotEmpty_.wait(lock, [this] { 
-            return !queue_.empty() || stopped_; 
-        });
-        
+        cvNotEmpty_.wait(lock, [this] { return !queue_.empty() || stopped_; });
+
         if (stopped_ && queue_.empty()) {
             return false;
         }
-        
+
         item = std::move(queue_.front());
         queue_.pop();
         cvNotFull_.notify_one();
@@ -77,15 +73,13 @@ template <typename T> class BoundedQueue {
 // Frame data structure for HDF5 writing
 struct H5FrameData {
     int frameNumber;
-    int64_t timestampMs;
-    std::vector<uint8_t> pixels;  // BGRA pixel data
+    int64_t timestampUs;         // Microseconds since epoch for precise synchronization
+    std::vector<uint8_t> pixels; // BGRA pixel data
     int width;
     int height;
     std::map<std::string, std::string> memoryData;
-    std::vector<std::string> keysPressed;
     double frameCaptureMs;
     double memoryReadMs;
-    double keystrokeCaptureMs;
     double diskWriteMs;
     double totalLatencyMs;
 };
@@ -94,8 +88,7 @@ struct H5FrameData {
 class H5RecordingWriter {
   public:
     H5RecordingWriter(const std::string &filepath, int width, int height,
-                      const std::vector<std::string> &attributeNames,
-                      size_t queueSize = 120);
+                      const std::vector<std::string> &attributeNames, size_t queueSize = 120);
     ~H5RecordingWriter();
 
     // Queue a frame for writing (non-blocking)
@@ -114,27 +107,20 @@ class H5RecordingWriter {
     void WriterThread();
     void WriteFrame(const H5FrameData &frameData);
     void InitializeDatasets();
-    std::vector<int> EncodeKeysPressed(const std::vector<std::string> &keys);
 
     std::string filepath_;
     int width_;
     int height_;
     std::vector<std::string> attributeNames_;
-    
+
     H5::H5File file_;
     H5::DataSet framesDataset_;
     H5::DataSet timestampsDataset_;
     H5::DataSet memoryDataset_;
-    H5::DataSet inputsDataset_;
     H5::DataSet latenciesDataset_;
-    
+
     BoundedQueue<H5FrameData> queue_;
     std::thread writerThread_;
     std::atomic<int> framesWritten_;
     std::atomic<bool> finalized_;
-    
-    // Key mapping for input encoding (scancode or virtual key index)
-    std::map<std::string, int> keyMap_;
-    static constexpr int MAX_KEYS = 300;  // Support 300 possible keys/buttons
 };
-

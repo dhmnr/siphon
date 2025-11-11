@@ -685,82 +685,115 @@ class SiphonServiceImpl final : public SiphonService::Service {
                              ServerWriter<RecordingChunk> *writer) override {
         std::lock_guard<std::mutex> lock(mutex_);
 
-        // Build path to recording file
+        // Build path to recording directory
         std::string sessionId = request->session_id();
         if (sessionId.empty()) {
             return Status(StatusCode::INVALID_ARGUMENT, "Session ID is required");
         }
 
-        // Find the recording file (assume it's in recordings/<session_id>/recording.h5)
-        std::filesystem::path recordingPath =
-            std::filesystem::current_path() / "recordings" / sessionId / "recording.h5";
+        // Find the recording directory
+        std::filesystem::path sessionDir =
+            std::filesystem::current_path() / "recordings" / sessionId;
 
-        if (!std::filesystem::exists(recordingPath)) {
-            spdlog::error("Recording file not found: {}", recordingPath.string());
-            return Status(StatusCode::NOT_FOUND,
-                          "Recording file not found for session: " + sessionId);
+        if (!std::filesystem::exists(sessionDir)) {
+            spdlog::error("Recording directory not found: {}", sessionDir.string());
+            return Status(StatusCode::NOT_FOUND, "Recording not found for session: " + sessionId);
         }
 
-        // Open file for binary reading
-        std::ifstream file(recordingPath, std::ios::binary | std::ios::ate);
-        if (!file.is_open()) {
-            spdlog::error("Failed to open recording file: {}", recordingPath.string());
-            return Status(StatusCode::INTERNAL, "Failed to open recording file");
-        }
+        // List of files to send (in order)
+        std::vector<std::string> filesToSend = {"video.mp4", "inputs.csv", "memory_data.csv",
+                                                "perf_data.csv"};
 
-        // Get file size
-        uint64_t totalSize = file.tellg();
-        file.seekg(0, std::ios::beg);
+        spdlog::info("Starting download of recording: {}", sessionId);
 
-        spdlog::info("Starting download of recording: {} ({} bytes)", sessionId, totalSize);
+        // Stream each file
+        for (size_t fileIndex = 0; fileIndex < filesToSend.size(); ++fileIndex) {
+            std::filesystem::path filePath = sessionDir / filesToSend[fileIndex];
 
-        // Stream file in chunks
-        const size_t chunkSize = 1024 * 1024; // 1MB chunks
-        std::vector<uint8_t> buffer(chunkSize);
-        uint64_t offset = 0;
-        size_t chunksWritten = 0;
-
-        while (file.read(reinterpret_cast<char *>(buffer.data()), chunkSize) || file.gcount() > 0) {
-            RecordingChunk chunk;
-            size_t bytesRead = file.gcount();
-
-            chunk.set_data(buffer.data(), bytesRead);
-            chunk.set_offset(offset);
-            chunk.set_total_size(totalSize);
-            chunk.set_is_final(file.eof());
-            chunk.set_filename("recording.h5");
-
-            if (!writer->Write(chunk)) {
-                spdlog::error("Failed to write chunk at offset {}", offset);
-                return Status(StatusCode::INTERNAL, "Failed to stream chunk");
+            // Skip if file doesn't exist (e.g., old recordings might not have all files)
+            if (!std::filesystem::exists(filePath)) {
+                spdlog::warn("File not found (skipping): {}", filePath.string());
+                continue;
             }
 
-            offset += bytesRead;
-            chunksWritten++;
-
-            // Log progress every 10 chunks (10MB)
-            if (chunksWritten % 10 == 0) {
-                double progress = (offset * 100.0) / totalSize;
-                spdlog::info("Download progress: {:.1f}% ({}/{})", progress, offset, totalSize);
+            // Open file for binary reading
+            std::ifstream file(filePath, std::ios::binary | std::ios::ate);
+            if (!file.is_open()) {
+                spdlog::error("Failed to open file: {}", filePath.string());
+                return Status(StatusCode::INTERNAL,
+                              "Failed to open file: " + filesToSend[fileIndex]);
             }
+
+            // Get file size
+            uint64_t fileSize = file.tellg();
+            file.seekg(0, std::ios::beg);
+
+            spdlog::info("Sending file: {} ({} bytes)", filesToSend[fileIndex], fileSize);
+
+            // Stream file in chunks
+            const size_t chunkSize = 1024 * 1024; // 1MB chunks
+            std::vector<uint8_t> buffer(chunkSize);
+            uint64_t offset = 0;
+            size_t chunksWritten = 0;
+
+            while (file.read(reinterpret_cast<char *>(buffer.data()), chunkSize) ||
+                   file.gcount() > 0) {
+                RecordingChunk chunk;
+                size_t bytesRead = file.gcount();
+                bool isLastFile = (fileIndex == filesToSend.size() - 1);
+
+                chunk.set_data(buffer.data(), bytesRead);
+                chunk.set_offset(offset);
+                chunk.set_total_size(fileSize);
+                chunk.set_is_final(file.eof() &&
+                                   isLastFile); // Only mark final on last chunk of last file
+                chunk.set_filename(filesToSend[fileIndex]);
+
+                if (!writer->Write(chunk)) {
+                    spdlog::error("Failed to write chunk at offset {} for {}", offset,
+                                  filesToSend[fileIndex]);
+                    return Status(StatusCode::INTERNAL, "Failed to stream chunk");
+                }
+
+                offset += bytesRead;
+                chunksWritten++;
+
+                // Log progress every 10 chunks (10MB) for large files
+                if (chunksWritten % 10 == 0 && fileSize > 10 * 1024 * 1024) {
+                    double progress = (offset * 100.0) / fileSize;
+                    spdlog::info("{} progress: {:.1f}% ({}/{})", filesToSend[fileIndex], progress,
+                                 offset, fileSize);
+                }
+            }
+
+            file.close();
+            spdlog::info("Completed sending {}: {} chunks, {} bytes", filesToSend[fileIndex],
+                         chunksWritten, fileSize);
         }
 
-        file.close();
-        spdlog::info("Download complete: {} chunks, {} bytes", chunksWritten, totalSize);
+        spdlog::info("Download complete for session: {}", sessionId);
 
-        // Delete the recording file after successful download
+        // Delete the recording directory after successful download
         try {
-            std::filesystem::path sessionDir = recordingPath.parent_path();
+            // Remove all files in the directory
+            for (const auto &entry : std::filesystem::directory_iterator(sessionDir)) {
+                if (std::filesystem::is_regular_file(entry)) {
+                    std::filesystem::remove(entry);
+                    spdlog::info("Deleted file: {}", entry.path().string());
+                }
+            }
 
-            // Delete the recording file
-            if (std::filesystem::remove(recordingPath)) {
-                spdlog::info("Deleted recording file: {}", recordingPath.string());
+            // Remove the frames directory if it exists
+            std::filesystem::path framesDir = sessionDir / "frames";
+            if (std::filesystem::exists(framesDir)) {
+                std::filesystem::remove_all(framesDir);
+                spdlog::info("Deleted frames directory");
             }
 
             // Try to remove the session directory if it's empty
             if (std::filesystem::is_empty(sessionDir)) {
                 if (std::filesystem::remove(sessionDir)) {
-                    spdlog::info("Deleted empty session directory: {}", sessionDir.string());
+                    spdlog::info("Deleted session directory: {}", sessionDir.string());
                 }
             }
         } catch (const std::exception &e) {

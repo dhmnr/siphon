@@ -9,14 +9,11 @@
 
 namespace fs = std::filesystem;
 
-// Static instance for hook callback
-ProcessRecorder *ProcessRecorder::instance_ = nullptr;
-
 ProcessRecorder::ProcessRecorder(ProcessCapture *capture, ProcessMemory *memory,
                                  ProcessInput *input)
     : capture_(capture), memory_(memory), input_(input), isRecording_(false), shouldStop_(false),
       currentFrame_(0), droppedFrames_(0), currentLatencyMs_(0.0), maxDurationSeconds_(0),
-      keyboardHook_(nullptr), mouseHook_(nullptr), hooksReady_(false) {
+      captureWidth_(0), captureHeight_(0), targetWindow_(nullptr) {
 
     // Initialize stats
     stats_.totalFrames = 0;
@@ -29,7 +26,11 @@ ProcessRecorder::ProcessRecorder(ProcessCapture *capture, ProcessMemory *memory,
     stats_.actualDurationSeconds = 0.0;
     stats_.actualFps = 0.0;
 
-    instance_ = this;
+    // Create input event logger
+    inputLogger_ = std::make_unique<InputEventLogger>();
+
+    // Create video encoder
+    videoEncoder_ = std::make_unique<VideoEncoder>();
 }
 
 ProcessRecorder::~ProcessRecorder() {
@@ -40,25 +41,23 @@ ProcessRecorder::~ProcessRecorder() {
         }
     }
 
-    if (keyboardHook_) {
-        UnhookWindowsHookEx(keyboardHook_);
-        keyboardHook_ = nullptr;
+    // Stop input logger if running
+    if (inputLogger_ && inputLogger_->IsLogging()) {
+        inputLogger_->StopLogging();
     }
 
-    if (mouseHook_) {
-        UnhookWindowsHookEx(mouseHook_);
-        mouseHook_ = nullptr;
+    // Stop video encoder if running
+    if (videoEncoder_) {
+        videoEncoder_->Finalize();
     }
 
-    // Stop hook thread
-    if (hookThread_.joinable()) {
-        PostThreadMessage(GetThreadId(hookThread_.native_handle()), WM_QUIT, 0, 0);
-        hookThread_.join();
+    // Close memory file if open
+    if (memoryFile_.is_open()) {
+        memoryFile_.close();
     }
 
-    if (instance_ == this) {
-        instance_ = nullptr;
-    }
+    // Cleanup DXGI resources
+    CleanupDXGICapture();
 }
 
 std::string ProcessRecorder::GenerateSessionId() {
@@ -140,43 +139,68 @@ bool ProcessRecorder::StartRecording(const std::vector<std::string> &attributeNa
                              std::chrono::system_clock::now().time_since_epoch())
                              .count();
 
-    // Initialize HDF5 writer
+    // Initialize DXGI Desktop Duplication for recording
+    if (!InitializeDXGICapture(capture_->processWindow)) {
+        spdlog::error("Failed to initialize DXGI capture, falling back to WGC");
+        // Continue with WGC - don't fail completely
+    }
+
+    // Initialize video encoder (lossless FFV1)
     try {
-        std::string h5Path = (fs::path(outputDirectory_) / sessionId_ / "recording.h5").string();
-        int width = capture_->processWindowWidth;
-        int height = capture_->processWindowHeight;
-        h5Writer_ =
-            std::make_unique<H5RecordingWriter>(h5Path, width, height, attributeNames_, 120);
-        spdlog::info("Initialized HDF5 writer: {}", h5Path);
+        std::string videoPath = (fs::path(outputDirectory_) / sessionId_ / "video.mp4").string();
+        int width = dxgiDuplication_ ? captureWidth_ : capture_->processWindowWidth;
+        int height = dxgiDuplication_ ? captureHeight_ : capture_->processWindowHeight;
+
+        if (!videoEncoder_->Initialize(videoPath, width, height, 60)) {
+            spdlog::error("Failed to initialize video encoder");
+            return false;
+        }
+        spdlog::info("Initialized video encoder (FFV1 lossless): {}", videoPath);
     } catch (const std::exception &e) {
-        spdlog::error("Failed to initialize HDF5 writer: {}", e.what());
+        spdlog::error("Failed to initialize video encoder: {}", e.what());
         return false;
     }
 
-    // Start hook thread (must have message loop for hooks to work)
-    hooksReady_ = false;
-    hookThread_ = std::thread(&ProcessRecorder::HookMessageLoop, this);
-
-    // Wait for hooks to be ready
-    auto startTime = std::chrono::steady_clock::now();
-    while (!hooksReady_) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        auto elapsed = std::chrono::steady_clock::now() - startTime;
-        if (elapsed > std::chrono::seconds(5)) {
-            spdlog::error("Timeout waiting for hooks to initialize");
-            if (hookThread_.joinable()) {
-                PostThreadMessage(GetThreadId(hookThread_.native_handle()), WM_QUIT, 0, 0);
-                hookThread_.join();
-            }
+    // Initialize memory data CSV file
+    if (!attributeNames_.empty()) {
+        std::string memoryPath =
+            (fs::path(outputDirectory_) / sessionId_ / "memory_data.csv").string();
+        memoryFile_.open(memoryPath, std::ios::out | std::ios::trunc);
+        if (!memoryFile_.is_open()) {
+            spdlog::error("Failed to open memory data file: {}", memoryPath);
             return false;
         }
+        WriteMemoryHeader();
+        spdlog::info("Initialized memory data CSV: {}", memoryPath);
     }
 
-    // Start recording thread
+    // Initialize performance data CSV file
+    std::string perfPath = (fs::path(outputDirectory_) / sessionId_ / "perf_data.csv").string();
+    perfFile_.open(perfPath, std::ios::out | std::ios::trunc);
+    if (!perfFile_.is_open()) {
+        spdlog::error("Failed to open perf data file: {}", perfPath);
+        return false;
+    }
+    WritePerfHeader();
+    spdlog::info("Initialized perf data CSV: {}", perfPath);
+
+    // Start input event logger (independent of video recording)
+    std::string inputLogPath = (fs::path(outputDirectory_) / sessionId_ / "inputs.csv").string();
+    if (!inputLogger_->StartLogging(inputLogPath)) {
+        spdlog::error("Failed to start input event logger");
+        return false;
+    }
+
+    // Start recording threads
     shouldStop_ = false;
     isRecording_ = true;
 
     recordingThread_ = std::thread(&ProcessRecorder::RecordingLoop, this);
+
+    // Start memory reading thread (runs independently)
+    if (!attributeNames_.empty()) {
+        memoryThread_ = std::thread(&ProcessRecorder::MemoryReadingLoop, this);
+    }
 
     spdlog::info("Recording started - Session ID: {}", sessionId_);
     spdlog::info("Output directory: {}", outputDirectory_);
@@ -194,26 +218,40 @@ bool ProcessRecorder::StopRecording(RecordingStats &stats) {
     spdlog::info("Stopping recording...");
     shouldStop_ = true;
 
-    // Wait for recording thread to finish
+    // Wait for recording threads to finish
     if (recordingThread_.joinable()) {
         recordingThread_.join();
+    }
+    if (memoryThread_.joinable()) {
+        memoryThread_.join();
     }
 
     isRecording_ = false;
 
-    // Stop hook thread
-    if (hookThread_.joinable()) {
-        PostThreadMessage(GetThreadId(hookThread_.native_handle()), WM_QUIT, 0, 0);
-        hookThread_.join();
+    // Stop input logger
+    if (inputLogger_ && inputLogger_->IsLogging()) {
+        inputLogger_->StopLogging();
     }
 
-    // Finalize HDF5 writer (waits for queue to drain)
-    if (h5Writer_) {
-        spdlog::info("Finalizing HDF5 writer - queue size: {}", h5Writer_->GetQueueSize());
-        h5Writer_->Finalize();
-        spdlog::info("HDF5 finalized - frames written: {}", h5Writer_->GetFramesWritten());
-        h5Writer_.reset();
+    // Finalize video encoder (waits for queue to drain)
+    if (videoEncoder_) {
+        spdlog::info("Finalizing video encoder - queue size: {}", videoEncoder_->GetQueueSize());
+        videoEncoder_->Finalize();
+        spdlog::info("Video finalized - frames encoded: {}", videoEncoder_->GetFramesEncoded());
     }
+
+    // Close memory file
+    if (memoryFile_.is_open()) {
+        memoryFile_.close();
+    }
+
+    // Close perf file
+    if (perfFile_.is_open()) {
+        perfFile_.close();
+    }
+
+    // Cleanup DXGI capture
+    CleanupDXGICapture();
 
     // Update final statistics
     stats_.endTimeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -253,266 +291,73 @@ bool ProcessRecorder::GetStatus(bool &isRecording, int &currentFrame, double &el
     return true;
 }
 
-// Static keyboard hook callback
-LRESULT CALLBACK ProcessRecorder::KeyboardHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
-    if (nCode >= 0 && instance_) {
-        KBDLLHOOKSTRUCT *pKeyBoard = (KBDLLHOOKSTRUCT *)lParam;
-        std::string keyName = instance_->VirtualKeyToString(pKeyBoard->vkCode);
-
-        std::lock_guard<std::mutex> lock(instance_->keystrokeMutex_);
-
-        if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
-            // Key pressed
-            if (std::find(instance_->currentKeysPressed_.begin(),
-                          instance_->currentKeysPressed_.end(),
-                          keyName) == instance_->currentKeysPressed_.end()) {
-                instance_->currentKeysPressed_.push_back(keyName);
-            }
-        } else if (wParam == WM_KEYUP || wParam == WM_SYSKEYUP) {
-            // Key released
-            instance_->currentKeysPressed_.erase(std::remove(instance_->currentKeysPressed_.begin(),
-                                                             instance_->currentKeysPressed_.end(),
-                                                             keyName),
-                                                 instance_->currentKeysPressed_.end());
-        }
-    }
-
-    return CallNextHookEx(NULL, nCode, wParam, lParam);
-}
-
-// Convert Windows Virtual Key Code to string
-std::string ProcessRecorder::VirtualKeyToString(DWORD vkCode) {
-    // Map virtual key codes to key names (matching Interception naming)
-    static std::map<DWORD, std::string> vkMap = {{VK_ESCAPE, "ESC"},
-                                                 {VK_BACK, "BACKSPACE"},
-                                                 {VK_TAB, "TAB"},
-                                                 {VK_RETURN, "ENTER"},
-                                                 {VK_SPACE, "SPACE"},
-                                                 {VK_CAPITAL, "CAPSLOCK"},
-                                                 {VK_NUMLOCK, "NUMLOCK"},
-                                                 {VK_SCROLL, "SCROLLLOCK"},
-                                                 {VK_LSHIFT, "LEFT_SHIFT"},
-                                                 {VK_RSHIFT, "RIGHT_SHIFT"},
-                                                 {VK_LCONTROL, "LEFT_CTRL"},
-                                                 {VK_LMENU, "LEFT_ALT"},
-
-                                                 // Function keys
-                                                 {VK_F1, "F1"},
-                                                 {VK_F2, "F2"},
-                                                 {VK_F3, "F3"},
-                                                 {VK_F4, "F4"},
-                                                 {VK_F5, "F5"},
-                                                 {VK_F6, "F6"},
-                                                 {VK_F7, "F7"},
-                                                 {VK_F8, "F8"},
-                                                 {VK_F9, "F9"},
-                                                 {VK_F10, "F10"},
-                                                 {VK_F11, "F11"},
-                                                 {VK_F12, "F12"},
-
-                                                 // Letters
-                                                 {0x41, "A"},
-                                                 {0x42, "B"},
-                                                 {0x43, "C"},
-                                                 {0x44, "D"},
-                                                 {0x45, "E"},
-                                                 {0x46, "F"},
-                                                 {0x47, "G"},
-                                                 {0x48, "H"},
-                                                 {0x49, "I"},
-                                                 {0x4A, "J"},
-                                                 {0x4B, "K"},
-                                                 {0x4C, "L"},
-                                                 {0x4D, "M"},
-                                                 {0x4E, "N"},
-                                                 {0x4F, "O"},
-                                                 {0x50, "P"},
-                                                 {0x51, "Q"},
-                                                 {0x52, "R"},
-                                                 {0x53, "S"},
-                                                 {0x54, "T"},
-                                                 {0x55, "U"},
-                                                 {0x56, "V"},
-                                                 {0x57, "W"},
-                                                 {0x58, "X"},
-                                                 {0x59, "Y"},
-                                                 {0x5A, "Z"},
-
-                                                 // Numbers
-                                                 {0x30, "0"},
-                                                 {0x31, "1"},
-                                                 {0x32, "2"},
-                                                 {0x33, "3"},
-                                                 {0x34, "4"},
-                                                 {0x35, "5"},
-                                                 {0x36, "6"},
-                                                 {0x37, "7"},
-                                                 {0x38, "8"},
-                                                 {0x39, "9"},
-
-                                                 // Numpad
-                                                 {VK_NUMPAD0, "KEYPAD_0"},
-                                                 {VK_NUMPAD1, "KEYPAD_1"},
-                                                 {VK_NUMPAD2, "KEYPAD_2"},
-                                                 {VK_NUMPAD3, "KEYPAD_3"},
-                                                 {VK_NUMPAD4, "KEYPAD_4"},
-                                                 {VK_NUMPAD5, "KEYPAD_5"},
-                                                 {VK_NUMPAD6, "KEYPAD_6"},
-                                                 {VK_NUMPAD7, "KEYPAD_7"},
-                                                 {VK_NUMPAD8, "KEYPAD_8"},
-                                                 {VK_NUMPAD9, "KEYPAD_9"},
-
-                                                 // Symbols
-                                                 {VK_OEM_MINUS, "MINUS"},
-                                                 {VK_OEM_PLUS, "EQUALS"},
-                                                 {VK_OEM_4, "LEFT_BRACKET"},
-                                                 {VK_OEM_6, "RIGHT_BRACKET"},
-                                                 {VK_OEM_1, "SEMICOLON"},
-                                                 {VK_OEM_7, "APOSTROPHE"},
-                                                 {VK_OEM_3, "GRAVE"},
-                                                 {VK_OEM_5, "BACKSLASH"},
-                                                 {VK_OEM_COMMA, "COMMA"},
-                                                 {VK_OEM_PERIOD, "PERIOD"},
-                                                 {VK_OEM_2, "SLASH"}};
-
-    auto it = vkMap.find(vkCode);
-    if (it != vkMap.end()) {
-        return it->second;
-    }
-
-    return "UNKNOWN_" + std::to_string(vkCode);
-}
-
-// Static mouse hook callback
-LRESULT CALLBACK ProcessRecorder::MouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
-    if (nCode >= 0 && instance_) {
-        std::lock_guard<std::mutex> lock(instance_->keystrokeMutex_);
-
-        std::string buttonName;
-        bool isPress = false;
-
-        switch (wParam) {
-        case WM_LBUTTONDOWN:
-            buttonName = "MOUSE_LEFT";
-            isPress = true;
-            break;
-        case WM_LBUTTONUP:
-            buttonName = "MOUSE_LEFT";
-            isPress = false;
-            break;
-        case WM_RBUTTONDOWN:
-            buttonName = "MOUSE_RIGHT";
-            isPress = true;
-            break;
-        case WM_RBUTTONUP:
-            buttonName = "MOUSE_RIGHT";
-            isPress = false;
-            break;
-        case WM_MBUTTONDOWN:
-            buttonName = "MOUSE_MIDDLE";
-            isPress = true;
-            break;
-        case WM_MBUTTONUP:
-            buttonName = "MOUSE_MIDDLE";
-            isPress = false;
-            break;
-        case WM_XBUTTONDOWN: {
-            MSLLHOOKSTRUCT *pMouse = (MSLLHOOKSTRUCT *)lParam;
-            if (HIWORD(pMouse->mouseData) == XBUTTON1) {
-                buttonName = "MOUSE_BUTTON4";
-            } else if (HIWORD(pMouse->mouseData) == XBUTTON2) {
-                buttonName = "MOUSE_BUTTON5";
-            }
-            isPress = true;
-            break;
-        }
-        case WM_XBUTTONUP: {
-            MSLLHOOKSTRUCT *pMouse = (MSLLHOOKSTRUCT *)lParam;
-            if (HIWORD(pMouse->mouseData) == XBUTTON1) {
-                buttonName = "MOUSE_BUTTON4";
-            } else if (HIWORD(pMouse->mouseData) == XBUTTON2) {
-                buttonName = "MOUSE_BUTTON5";
-            }
-            isPress = false;
-            break;
-        }
-        }
-
-        if (!buttonName.empty()) {
-            if (isPress) {
-                // Button pressed
-                if (std::find(instance_->currentKeysPressed_.begin(),
-                              instance_->currentKeysPressed_.end(),
-                              buttonName) == instance_->currentKeysPressed_.end()) {
-                    instance_->currentKeysPressed_.push_back(buttonName);
-                }
-            } else {
-                // Button released
-                instance_->currentKeysPressed_.erase(
-                    std::remove(instance_->currentKeysPressed_.begin(),
-                                instance_->currentKeysPressed_.end(), buttonName),
-                    instance_->currentKeysPressed_.end());
-            }
-        }
-    }
-
-    return CallNextHookEx(NULL, nCode, wParam, lParam);
-}
-
-std::vector<std::string> ProcessRecorder::GetCurrentKeysPressed() {
-    std::lock_guard<std::mutex> lock(keystrokeMutex_);
-    return currentKeysPressed_;
-}
-
-// Hook message loop thread - required for hooks to work
-void ProcessRecorder::HookMessageLoop() {
-    spdlog::info("Hook message loop thread started");
-
-    // Install keyboard hook
-    keyboardHook_ = SetWindowsHookEx(WH_KEYBOARD_LL, KeyboardHookProc, GetModuleHandle(NULL), 0);
-    if (!keyboardHook_) {
-        spdlog::error("Failed to create keyboard hook: {}", GetLastError());
-        hooksReady_ = true;
+void ProcessRecorder::WriteMemoryHeader() {
+    if (!memoryFile_.is_open())
         return;
-    }
 
-    // Install mouse hook
-    mouseHook_ = SetWindowsHookEx(WH_MOUSE_LL, MouseHookProc, GetModuleHandle(NULL), 0);
-    if (!mouseHook_) {
-        spdlog::error("Failed to create mouse hook: {}", GetLastError());
-        UnhookWindowsHookEx(keyboardHook_);
-        keyboardHook_ = nullptr;
-        hooksReady_ = true;
+    std::lock_guard<std::mutex> lock(memoryMutex_);
+    memoryFile_ << "timestamp_us";
+    for (const auto &attrName : attributeNames_) {
+        memoryFile_ << "," << attrName;
+    }
+    memoryFile_ << "\n";
+    memoryFile_.flush();
+}
+
+void ProcessRecorder::WriteMemoryFrame(const MemoryFrameData &data) {
+    if (!memoryFile_.is_open())
         return;
-    }
 
-    spdlog::info("Keyboard and mouse hooks installed successfully");
-    hooksReady_ = true;
-
-    // Message loop - required for hooks to receive events
-    MSG msg;
-    while (GetMessage(&msg, NULL, 0, 0)) {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
+    std::lock_guard<std::mutex> lock(memoryMutex_);
+    memoryFile_ << data.timestampUs;
+    for (const auto &attrName : attributeNames_) {
+        auto it = data.memoryData.find(attrName);
+        if (it != data.memoryData.end()) {
+            memoryFile_ << "," << it->second;
+        } else {
+            memoryFile_ << ",0";
+        }
     }
+    memoryFile_ << "\n";
 
-    // Cleanup hooks when message loop exits
-    if (keyboardHook_) {
-        UnhookWindowsHookEx(keyboardHook_);
-        keyboardHook_ = nullptr;
+    // Flush every 60 frames
+    if (currentFrame_ % 60 == 0) {
+        memoryFile_.flush();
     }
-    if (mouseHook_) {
-        UnhookWindowsHookEx(mouseHook_);
-        mouseHook_ = nullptr;
-    }
+}
 
-    spdlog::info("Hook message loop thread stopped");
+void ProcessRecorder::WritePerfHeader() {
+    if (!perfFile_.is_open())
+        return;
+
+    std::lock_guard<std::mutex> lock(perfMutex_);
+    perfFile_ << "frame,timestamp_us,total_ms,capture_ms,fps,queue_size,dropped_frames\n";
+    perfFile_.flush();
+}
+
+void ProcessRecorder::WritePerfData(int frame, int64_t timestampUs, double totalMs,
+                                    double captureMs, double fps, size_t queueSize, int dropped) {
+    if (!perfFile_.is_open())
+        return;
+
+    std::lock_guard<std::mutex> lock(perfMutex_);
+    perfFile_ << frame << "," << timestampUs << "," << totalMs << "," << captureMs << "," << fps
+              << "," << queueSize << "," << dropped << "\n";
+
+    // Flush every 60 frames
+    if (frame % 60 == 0) {
+        perfFile_.flush();
+    }
 }
 
 void ProcessRecorder::RecordingLoop() {
-    spdlog::info("Recording loop started - Target: 60fps (16.67ms per frame)");
+    if (dxgiDuplication_) {
+        spdlog::info("==> Using DXGI Desktop Duplication (polling mode)");
+    } else {
+        spdlog::info("==> Using Windows Graphics Capture (event-based fallback)");
+    }
+    spdlog::info("Recording loop started - Capturing at game framerate");
 
-    const auto targetFrameTime = std::chrono::microseconds(16667); // 60fps = 16.67ms
     auto lastFrameTime = std::chrono::high_resolution_clock::now();
 
     while (!shouldStop_) {
@@ -538,30 +383,97 @@ void ProcessRecorder::RecordingLoop() {
             DispatchMessage(&msg);
         }
 
-        // Check if a new frame is available from Windows Graphics Capture
-        if (!capture_->IsNewFrameAvailable()) {
-            // No new frame yet, sleep briefly and continue
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            continue;
+        int64_t timestampUs =
+            std::chrono::duration_cast<std::chrono::microseconds>(wallClockTime.time_since_epoch())
+                .count();
+
+        // Capture video frame using DXGI if available, otherwise fall back to WGC
+        auto captureStart = std::chrono::high_resolution_clock::now();
+        std::vector<uint8_t> pixels;
+
+        if (dxgiDuplication_) {
+            // Use DXGI Desktop Duplication (60fps polling)
+            pixels = CaptureFrameDXGI();
+            // If no new frame, keep using last frame
+            static std::vector<uint8_t> lastFrame;
+            if (!pixels.empty()) {
+                lastFrame = pixels;
+            } else if (!lastFrame.empty()) {
+                pixels = lastFrame;
+            }
+        } else {
+            // Fall back to WGC
+            pixels = capture_->GetPixelData();
         }
 
-        H5FrameData frameData;
-        frameData.frameNumber = currentFrame_;
-        frameData.timestampMs =
-            std::chrono::duration_cast<std::chrono::milliseconds>(wallClockTime.time_since_epoch())
-                .count();
-        frameData.width = capture_->processWindowWidth;
-        frameData.height = capture_->processWindowHeight;
-
-        // Capture frame
-        auto captureStart = std::chrono::high_resolution_clock::now();
-        frameData.pixels = capture_->GetPixelData();
         auto captureEnd = std::chrono::high_resolution_clock::now();
-        frameData.frameCaptureMs =
+        double frameCaptureMs =
             std::chrono::duration<double, std::milli>(captureEnd - captureStart).count();
 
+        // Queue frame for video encoding
+        EncoderFrame videoFrame;
+        videoFrame.pixels = std::move(pixels);
+        videoFrame.timestampUs = timestampUs;
+        videoFrame.width = dxgiDuplication_ ? captureWidth_ : capture_->processWindowWidth;
+        videoFrame.height = dxgiDuplication_ ? captureHeight_ : capture_->processWindowHeight;
+        videoEncoder_->EncodeFrame(std::move(videoFrame));
+
+        // Calculate total frame time
+        auto frameEndTime = std::chrono::high_resolution_clock::now();
+        double totalMs =
+            std::chrono::duration<double, std::milli>(frameEndTime - frameStartTime).count();
+
+        // Update statistics
+        currentLatencyMs_ = totalMs;
+        if (totalMs > stats_.maxLatencyMs) {
+            stats_.maxLatencyMs = totalMs;
+        }
+        if (totalMs < stats_.minLatencyMs) {
+            stats_.minLatencyMs = totalMs;
+        }
+
+        // Accumulate average latency
+        stats_.averageLatencyMs =
+            (stats_.averageLatencyMs * currentFrame_ + totalMs) / (currentFrame_ + 1);
+
+        // Check if we exceeded frame time budget (60fps = 16.67ms)
+        if (totalMs > 16.67) {
+            droppedFrames_++;
+        }
+
+        currentFrame_++;
+
+        // Write performance data to CSV
+        auto currentTime = std::chrono::system_clock::now();
+        auto elapsed =
+            std::chrono::duration_cast<std::chrono::milliseconds>(currentTime.time_since_epoch())
+                .count() -
+            stats_.startTimeMs;
+        double actualFps = elapsed > 0 ? (currentFrame_ * 1000.0) / elapsed : 0.0;
+        size_t videoQueueSize = videoEncoder_->GetQueueSize();
+
+        WritePerfData(currentFrame_, timestampUs, totalMs, frameCaptureMs, actualFps,
+                      videoQueueSize, droppedFrames_);
+
+        lastFrameTime = frameEndTime;
+    }
+
+    spdlog::info("Recording loop stopped");
+}
+
+void ProcessRecorder::MemoryReadingLoop() {
+    spdlog::info("Memory reading thread started");
+
+    while (!shouldStop_) {
+        auto wallClockTime = std::chrono::system_clock::now();
+        int64_t timestampUs =
+            std::chrono::duration_cast<std::chrono::microseconds>(wallClockTime.time_since_epoch())
+                .count();
+
         // Read memory attributes
-        auto memoryStart = std::chrono::high_resolution_clock::now();
+        MemoryFrameData memoryData;
+        memoryData.timestampUs = timestampUs;
+
         for (const auto &attrName : attributeNames_) {
             try {
                 ProcessAttribute attr = memory_->GetAttribute(attrName);
@@ -581,76 +493,205 @@ void ProcessRecorder::RecordingLoop() {
                     value = "0";
                 }
 
-                frameData.memoryData[attrName] = value;
+                memoryData.memoryData[attrName] = value;
             } catch (const std::exception &e) {
-                frameData.memoryData[attrName] = "0";
+                memoryData.memoryData[attrName] = "0";
             }
         }
-        auto memoryEnd = std::chrono::high_resolution_clock::now();
-        frameData.memoryReadMs =
-            std::chrono::duration<double, std::milli>(memoryEnd - memoryStart).count();
 
-        // Capture keystrokes (snapshot current keys)
-        auto keystrokeStart = std::chrono::high_resolution_clock::now();
-        frameData.keysPressed = GetCurrentKeysPressed();
-        auto keystrokeEnd = std::chrono::high_resolution_clock::now();
-        frameData.keystrokeCaptureMs =
-            std::chrono::duration<double, std::milli>(keystrokeEnd - keystrokeStart).count();
+        // Write memory data to CSV
+        WriteMemoryFrame(memoryData);
 
-        // Calculate queue timing before moving frameData
-        auto queueStart = std::chrono::high_resolution_clock::now();
-        auto frameEndTime = std::chrono::high_resolution_clock::now();
-        double totalMs =
-            std::chrono::duration<double, std::milli>(frameEndTime - frameStartTime).count();
-
-        frameData.diskWriteMs = std::chrono::duration<double, std::milli>(queueStart - queueStart)
-                                    .count(); // Queue is instant
-        frameData.totalLatencyMs = totalMs;
-
-        // Queue frame for async HDF5 writing (non-blocking)
-        if (h5Writer_) {
-            h5Writer_->QueueFrame(std::move(frameData));
-        }
-
-        // Update statistics
-        currentLatencyMs_ = totalMs;
-        if (totalMs > stats_.maxLatencyMs) {
-            stats_.maxLatencyMs = totalMs;
-        }
-        if (totalMs < stats_.minLatencyMs) {
-            stats_.minLatencyMs = totalMs;
-        }
-
-        // Accumulate average latency
-        stats_.averageLatencyMs =
-            (stats_.averageLatencyMs * currentFrame_ + totalMs) / (currentFrame_ + 1);
-
-        // Check if we exceeded frame time budget
-        if (totalMs > 16.67) {
-            droppedFrames_++;
-            spdlog::warn("Frame {} exceeded time budget: {:.2f}ms", frameData.frameNumber, totalMs);
-        }
-
-        currentFrame_++;
-
-        // Log progress every 60 frames
-        if (currentFrame_ % 60 == 0 && currentFrame_ > 0) {
-            auto currentTime = std::chrono::system_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                               currentTime.time_since_epoch())
-                               .count() -
-                           stats_.startTimeMs;
-            double actualFps = (currentFrame_ * 1000.0) / elapsed;
-            spdlog::info("Frame {}: {:.2f}ms (capture: {:.2f}ms, memory: {:.2f}ms, keys: "
-                         "{:.2f}ms, queue: {:.2f}ms) - FPS: {:.1f}",
-                         frameData.frameNumber, totalMs, frameData.frameCaptureMs,
-                         frameData.memoryReadMs, frameData.keystrokeCaptureMs,
-                         frameData.diskWriteMs, actualFps);
-        }
-
-        lastFrameTime = frameEndTime;
+        // Sleep for a bit to avoid hammering the process memory
+        // Aiming for ~30 Hz memory sampling (independent of video capture)
+        std::this_thread::sleep_for(std::chrono::milliseconds(33));
     }
 
-    spdlog::info("Recording loop stopped");
+    spdlog::info("Memory reading thread stopped");
 }
-// Old methods removed - now using H5RecordingWriter for async HDF5 storage
+
+bool ProcessRecorder::InitializeDXGICapture(HWND window) {
+    spdlog::info("Initializing DXGI Desktop Duplication capture...");
+
+    targetWindow_ = window;
+
+    // Create D3D11 device
+    D3D_FEATURE_LEVEL featureLevel;
+    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0,
+                                   D3D11_SDK_VERSION, &d3dDevice_, &featureLevel, &d3dContext_);
+
+    if (FAILED(hr)) {
+        spdlog::error("Failed to create D3D11 device: 0x{:X}", hr);
+        return false;
+    }
+
+    // Get DXGI device
+    ComPtr<IDXGIDevice> dxgiDevice;
+    hr = d3dDevice_.As(&dxgiDevice);
+    if (FAILED(hr)) {
+        spdlog::error("Failed to get DXGI device: 0x{:X}", hr);
+        return false;
+    }
+
+    // Get DXGI adapter
+    ComPtr<IDXGIAdapter> dxgiAdapter;
+    hr = dxgiDevice->GetAdapter(&dxgiAdapter);
+    if (FAILED(hr)) {
+        spdlog::error("Failed to get DXGI adapter: 0x{:X}", hr);
+        return false;
+    }
+
+    // Get monitor that contains the window
+    HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTOPRIMARY);
+
+    // Find the output (monitor) that matches
+    ComPtr<IDXGIOutput> dxgiOutput;
+    UINT outputIndex = 0;
+    while (dxgiAdapter->EnumOutputs(outputIndex, &dxgiOutput) != DXGI_ERROR_NOT_FOUND) {
+        DXGI_OUTPUT_DESC outputDesc;
+        dxgiOutput->GetDesc(&outputDesc);
+
+        if (outputDesc.Monitor == monitor) {
+            break;
+        }
+
+        dxgiOutput = nullptr;
+        outputIndex++;
+    }
+
+    if (!dxgiOutput) {
+        spdlog::error("Failed to find DXGI output for window's monitor");
+        return false;
+    }
+
+    // Get IDXGIOutput1
+    ComPtr<IDXGIOutput1> dxgiOutput1;
+    hr = dxgiOutput.As(&dxgiOutput1);
+    if (FAILED(hr)) {
+        spdlog::error("Failed to get IDXGIOutput1: 0x{:X}", hr);
+        return false;
+    }
+
+    // Create desktop duplication
+    hr = dxgiOutput1->DuplicateOutput(d3dDevice_.Get(), &dxgiDuplication_);
+    if (FAILED(hr)) {
+        spdlog::error("Failed to create desktop duplication: 0x{:X}", hr);
+        spdlog::error("Make sure no other desktop duplication is active");
+        return false;
+    }
+
+    // Get duplication description for dimensions
+    DXGI_OUTDUPL_DESC duplDesc;
+    dxgiDuplication_->GetDesc(&duplDesc);
+
+    // Get window size to determine capture area
+    RECT windowRect;
+    GetWindowRect(window, &windowRect);
+    captureWidth_ = windowRect.right - windowRect.left;
+    captureHeight_ = windowRect.bottom - windowRect.top;
+
+    spdlog::info("DXGI Capture initialized: {}x{}", captureWidth_, captureHeight_);
+    spdlog::info("Desktop size: {}x{}", duplDesc.ModeDesc.Width, duplDesc.ModeDesc.Height);
+
+    // Create staging texture for CPU readback
+    D3D11_TEXTURE2D_DESC stagingDesc = {};
+    stagingDesc.Width = captureWidth_;
+    stagingDesc.Height = captureHeight_;
+    stagingDesc.MipLevels = 1;
+    stagingDesc.ArraySize = 1;
+    stagingDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    stagingDesc.SampleDesc.Count = 1;
+    stagingDesc.Usage = D3D11_USAGE_STAGING;
+    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+
+    hr = d3dDevice_->CreateTexture2D(&stagingDesc, nullptr, &stagingTexture_);
+    if (FAILED(hr)) {
+        spdlog::error("Failed to create staging texture: 0x{:X}", hr);
+        return false;
+    }
+
+    spdlog::info("DXGI Desktop Duplication ready for 60fps capture");
+    return true;
+}
+
+void ProcessRecorder::CleanupDXGICapture() {
+    if (dxgiDuplication_) {
+        dxgiDuplication_->ReleaseFrame();
+        dxgiDuplication_ = nullptr;
+    }
+
+    stagingTexture_ = nullptr;
+    d3dContext_ = nullptr;
+    d3dDevice_ = nullptr;
+
+    spdlog::info("DXGI capture cleanup complete");
+}
+
+std::vector<uint8_t> ProcessRecorder::CaptureFrameDXGI() {
+    std::vector<uint8_t> pixels;
+
+    if (!dxgiDuplication_) {
+        return pixels;
+    }
+
+    // Try to acquire next frame (with timeout)
+    ComPtr<IDXGIResource> desktopResource;
+    DXGI_OUTDUPL_FRAME_INFO frameInfo;
+    HRESULT hr = dxgiDuplication_->AcquireNextFrame(0, &frameInfo, &desktopResource);
+
+    if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
+        // No new frame, return empty (we'll use last frame)
+        return pixels;
+    }
+
+    if (FAILED(hr)) {
+        spdlog::warn("AcquireNextFrame failed: 0x{:X}", hr);
+        return pixels;
+    }
+
+    // Get texture from resource
+    ComPtr<ID3D11Texture2D> desktopTexture;
+    hr = desktopResource.As(&desktopTexture);
+    if (FAILED(hr)) {
+        dxgiDuplication_->ReleaseFrame();
+        return pixels;
+    }
+
+    // Get window position on screen
+    RECT windowRect;
+    GetWindowRect(targetWindow_, &windowRect);
+
+    // Copy window region to staging texture
+    D3D11_BOX sourceRegion;
+    sourceRegion.left = windowRect.left;
+    sourceRegion.right = windowRect.right;
+    sourceRegion.top = windowRect.top;
+    sourceRegion.bottom = windowRect.bottom;
+    sourceRegion.front = 0;
+    sourceRegion.back = 1;
+
+    d3dContext_->CopySubresourceRegion(stagingTexture_.Get(), 0, 0, 0, 0, desktopTexture.Get(), 0,
+                                       &sourceRegion);
+
+    // Map staging texture to read pixels
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    hr = d3dContext_->Map(stagingTexture_.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+    if (SUCCEEDED(hr)) {
+        // Copy pixel data
+        pixels.resize(captureWidth_ * captureHeight_ * 4);
+
+        uint8_t *src = static_cast<uint8_t *>(mapped.pData);
+        uint8_t *dst = pixels.data();
+
+        for (int y = 0; y < captureHeight_; y++) {
+            memcpy(dst + y * captureWidth_ * 4, src + y * mapped.RowPitch, captureWidth_ * 4);
+        }
+
+        d3dContext_->Unmap(stagingTexture_.Get(), 0);
+    }
+
+    // Release the frame
+    dxgiDuplication_->ReleaseFrame();
+
+    return pixels;
+}

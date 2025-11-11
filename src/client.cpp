@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -640,7 +641,7 @@ class SiphonClient {
         return result;
     }
 
-    bool DownloadRecording(const std::string &sessionId, const std::string &outputPath) {
+    bool DownloadRecording(const std::string &sessionId, const std::string &outputDir) {
         DownloadRecordingRequest request;
         ClientContext context;
 
@@ -649,49 +650,84 @@ class SiphonClient {
         std::unique_ptr<grpc::ClientReader<RecordingChunk>> reader(
             stub_->DownloadRecording(&context, request));
 
-        // Open output file
-        std::ofstream outFile(outputPath, std::ios::binary);
-        if (!outFile.is_open()) {
-            std::cerr << "Failed to open output file: " << outputPath << std::endl;
-            return false;
+        // Create output directory if it doesn't exist
+        std::filesystem::path outputPath(outputDir);
+        if (!std::filesystem::exists(outputPath)) {
+            std::filesystem::create_directories(outputPath);
         }
 
         RecordingChunk chunk;
+        std::string currentFilename;
+        std::ofstream outFile;
         uint64_t totalBytesReceived = 0;
-        uint64_t totalSize = 0;
+        uint64_t fileBytesReceived = 0;
+        uint64_t fileSize = 0;
         int chunksReceived = 0;
+        int filesReceived = 0;
 
-        std::cout << "Downloading recording..." << std::endl;
+        std::cout << "Downloading recording to: " << outputPath.string() << std::endl;
 
         while (reader->Read(&chunk)) {
+            // Check if we need to open a new file
+            if (chunk.filename() != currentFilename) {
+                // Close previous file if open
+                if (outFile.is_open()) {
+                    outFile.close();
+                    std::cout << std::endl;
+                    std::cout << "✓ Completed: " << currentFilename << " (" << fileBytesReceived
+                              << " bytes)" << std::endl;
+                    filesReceived++;
+                }
+
+                // Open new file
+                currentFilename = chunk.filename();
+                fileBytesReceived = 0;
+                fileSize = chunk.total_size();
+
+                std::filesystem::path filePath = outputPath / currentFilename;
+                outFile.open(filePath, std::ios::binary);
+                if (!outFile.is_open()) {
+                    std::cerr << "Failed to open output file: " << filePath.string() << std::endl;
+                    return false;
+                }
+
+                std::cout << "Downloading: " << currentFilename << " (" << fileSize << " bytes)"
+                          << std::endl;
+            }
+
             // Write chunk data to file
             outFile.write(reinterpret_cast<const char *>(chunk.data().data()), chunk.data().size());
 
             totalBytesReceived += chunk.data().size();
-            totalSize = chunk.total_size();
+            fileBytesReceived += chunk.data().size();
             chunksReceived++;
 
-            // Show progress
-            if (chunksReceived % 10 == 0 || chunk.is_final()) {
-                double progress = (totalBytesReceived * 100.0) / totalSize;
-                std::cout << "\rProgress: " << std::fixed << std::setprecision(1) << progress
-                          << "% (" << totalBytesReceived << "/" << totalSize << " bytes)"
+            // Show progress for large files
+            if (fileSize > 10 * 1024 * 1024 && (chunksReceived % 10 == 0 || chunk.is_final())) {
+                double progress = (fileBytesReceived * 100.0) / fileSize;
+                std::cout << "\r  Progress: " << std::fixed << std::setprecision(1) << progress
+                          << "% (" << fileBytesReceived << "/" << fileSize << " bytes)"
                           << std::flush;
             }
 
             if (chunk.is_final()) {
-                std::cout << std::endl;
+                if (outFile.is_open()) {
+                    outFile.close();
+                    std::cout << std::endl;
+                    std::cout << "✓ Completed: " << currentFilename << " (" << fileBytesReceived
+                              << " bytes)" << std::endl;
+                    filesReceived++;
+                }
                 break;
             }
         }
 
-        outFile.close();
-
         Status status = reader->Finish();
         if (status.ok()) {
-            std::cout << "Download complete! Saved to: " << outputPath << std::endl;
-            std::cout << "Total: " << chunksReceived << " chunks, " << totalBytesReceived
-                      << " bytes" << std::endl;
+            std::cout << "\n✓ Download complete!" << std::endl;
+            std::cout << "  Files received: " << filesReceived << std::endl;
+            std::cout << "  Total size: " << totalBytesReceived << " bytes" << std::endl;
+            std::cout << "  Saved to: " << outputPath.string() << std::endl;
             return true;
         } else {
             std::cerr << "Download failed: " << status.error_message() << std::endl;
@@ -769,8 +805,9 @@ int main() {
               << std::endl;
     std::cout << "  rec-stop <session_id>     - Stop recording session" << std::endl;
     std::cout << "  rec-status <session_id>   - Get recording status" << std::endl;
-    std::cout << "  rec-download <session_id> <output_file>" << std::endl;
-    std::cout << "                            - Download recording HDF5 file" << std::endl;
+    std::cout << "  rec-download <session_id> <output_directory>" << std::endl;
+    std::cout << "                            - Download recording files (video, inputs, memory)"
+              << std::endl;
     std::cout << "\n=== General ===" << std::endl;
     std::cout << "  quit                      - Exit client" << std::endl;
 
@@ -1263,18 +1300,18 @@ int main() {
                 std::cin.ignore(10000, '\n');
             }
         } else if (command == "rec-download") {
-            std::string sessionId, outputFile;
-            if (std::cin >> sessionId >> outputFile) {
+            std::string sessionId, outputDir;
+            if (std::cin >> sessionId >> outputDir) {
                 std::cout << "Downloading recording: " << sessionId << std::endl;
-                std::cout << "Output file: " << outputFile << std::endl;
+                std::cout << "Output directory: " << outputDir << std::endl;
 
-                if (client.DownloadRecording(sessionId, outputFile)) {
+                if (client.DownloadRecording(sessionId, outputDir)) {
                     std::cout << "Download successful!" << std::endl;
                 } else {
                     std::cout << "Download failed!" << std::endl;
                 }
             } else {
-                std::cout << "Invalid input. Use: rec-download <session_id> <output_file>"
+                std::cout << "Invalid input. Use: rec-download <session_id> <output_directory>"
                           << std::endl;
                 std::cin.clear();
                 std::cin.ignore(10000, '\n');
