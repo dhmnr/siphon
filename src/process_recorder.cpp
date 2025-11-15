@@ -10,10 +10,10 @@
 namespace fs = std::filesystem;
 
 ProcessRecorder::ProcessRecorder(ProcessCapture *capture, ProcessMemory *memory,
-                                 ProcessInput *input)
-    : capture_(capture), memory_(memory), input_(input), isRecording_(false), shouldStop_(false),
-      currentFrame_(0), droppedFrames_(0), currentLatencyMs_(0.0), maxDurationSeconds_(0),
-      captureWidth_(0), captureHeight_(0), targetWindow_(nullptr) {
+                                 ProcessInput *input, FrameBroadcaster *frameBroadcaster)
+    : capture_(capture), memory_(memory), input_(input), frameBroadcaster_(frameBroadcaster),
+      isRecording_(false), shouldStop_(false), currentFrame_(0), droppedFrames_(0),
+      currentLatencyMs_(0.0), maxDurationSeconds_(0), frameSubscriptionId_(0), hasNewFrame_(false) {
 
     // Initialize stats
     stats_.totalFrames = 0;
@@ -41,6 +41,11 @@ ProcessRecorder::~ProcessRecorder() {
         }
     }
 
+    // Unsubscribe from frame broadcaster
+    if (frameBroadcaster_ && frameSubscriptionId_ != 0) {
+        frameBroadcaster_->Unsubscribe(frameSubscriptionId_);
+    }
+
     // Stop input logger if running
     if (inputLogger_ && inputLogger_->IsLogging()) {
         inputLogger_->StopLogging();
@@ -55,9 +60,6 @@ ProcessRecorder::~ProcessRecorder() {
     if (memoryFile_.is_open()) {
         memoryFile_.close();
     }
-
-    // Cleanup DXGI resources
-    CleanupDXGICapture();
 }
 
 std::string ProcessRecorder::GenerateSessionId() {
@@ -139,23 +141,17 @@ bool ProcessRecorder::StartRecording(const std::vector<std::string> &attributeNa
                              std::chrono::system_clock::now().time_since_epoch())
                              .count();
 
-    // Initialize DXGI Desktop Duplication for recording
-    if (!InitializeDXGICapture(capture_->processWindow)) {
-        spdlog::error("Failed to initialize DXGI capture, falling back to WGC");
-        // Continue with WGC - don't fail completely
-    }
-
-    // Initialize video encoder (lossless FFV1)
+    // Initialize video encoder using capture dimensions
     try {
         std::string videoPath = (fs::path(outputDirectory_) / sessionId_ / "video.mp4").string();
-        int width = dxgiDuplication_ ? captureWidth_ : capture_->processWindowWidth;
-        int height = dxgiDuplication_ ? captureHeight_ : capture_->processWindowHeight;
+        int width = capture_->processWindowWidth;
+        int height = capture_->processWindowHeight;
 
         if (!videoEncoder_->Initialize(videoPath, width, height, 60)) {
             spdlog::error("Failed to initialize video encoder");
             return false;
         }
-        spdlog::info("Initialized video encoder (FFV1 lossless): {}", videoPath);
+        spdlog::info("Initialized video encoder (H.264 CRF-20): {}", videoPath);
     } catch (const std::exception &e) {
         spdlog::error("Failed to initialize video encoder: {}", e.what());
         return false;
@@ -249,9 +245,6 @@ bool ProcessRecorder::StopRecording(RecordingStats &stats) {
     if (perfFile_.is_open()) {
         perfFile_.close();
     }
-
-    // Cleanup DXGI capture
-    CleanupDXGICapture();
 
     // Update final statistics
     stats_.endTimeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -351,19 +344,25 @@ void ProcessRecorder::WritePerfData(int frame, int64_t timestampUs, double total
 }
 
 void ProcessRecorder::RecordingLoop() {
-    if (dxgiDuplication_) {
-        spdlog::info("==> Using DXGI Desktop Duplication (polling mode)");
-    } else {
-        spdlog::info("==> Using Windows Graphics Capture (event-based fallback)");
-    }
-    spdlog::info("Recording loop started - Capturing every 4th frame (~15fps)");
+    spdlog::info("Recording loop started - receiving frames from FrameBroadcaster (~15fps)");
 
-    auto lastFrameTime = std::chrono::high_resolution_clock::now();
-    int loopCounter = 0; // Track all loop iterations
+    // Subscribe to frame broadcaster
+    if (!frameBroadcaster_) {
+        spdlog::error("FrameBroadcaster not available!");
+        return;
+    }
+
+    auto frameCallback = [this](const CapturedFrame &frame) {
+        std::lock_guard<std::mutex> lock(frameMutex_);
+        latestFrame_ = frame;
+        hasNewFrame_ = true;
+    };
+
+    frameSubscriptionId_ = frameBroadcaster_->Subscribe(frameCallback);
+    spdlog::info("Subscribed to FrameBroadcaster with ID: {}", frameSubscriptionId_);
 
     while (!shouldStop_) {
         auto frameStartTime = std::chrono::high_resolution_clock::now();
-        auto wallClockTime = std::chrono::system_clock::now();
 
         // Check max duration
         if (maxDurationSeconds_ > 0) {
@@ -384,47 +383,31 @@ void ProcessRecorder::RecordingLoop() {
             DispatchMessage(&msg);
         }
 
-        // Skip frames - only capture every 4th frame for ~15fps
-        loopCounter++;
-        if (loopCounter % 4 != 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1)); // Small sleep
+        // Wait for new frame from broadcaster
+        if (!hasNewFrame_) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
         }
 
-        int64_t timestampUs =
-            std::chrono::duration_cast<std::chrono::microseconds>(wallClockTime.time_since_epoch())
-                .count();
+        // Get frame data
+        frameMutex_.lock();
+        CapturedFrame frame = latestFrame_;
+        hasNewFrame_ = false;
+        frameMutex_.unlock();
 
-        // Capture video frame using DXGI if available, otherwise fall back to WGC
         auto captureStart = std::chrono::high_resolution_clock::now();
-        std::vector<uint8_t> pixels;
 
-        if (dxgiDuplication_) {
-            // Use DXGI Desktop Duplication (60fps polling)
-            pixels = CaptureFrameDXGI();
-            // If no new frame, keep using last frame
-            static std::vector<uint8_t> lastFrame;
-            if (!pixels.empty()) {
-                lastFrame = pixels;
-            } else if (!lastFrame.empty()) {
-                pixels = lastFrame;
-            }
-        } else {
-            // Fall back to WGC
-            pixels = capture_->GetPixelData();
-        }
+        // Queue frame for video encoding
+        EncoderFrame videoFrame;
+        videoFrame.pixels = std::move(frame.pixels);
+        videoFrame.timestampUs = frame.timestampUs;
+        videoFrame.width = frame.width;
+        videoFrame.height = frame.height;
+        videoEncoder_->EncodeFrame(std::move(videoFrame));
 
         auto captureEnd = std::chrono::high_resolution_clock::now();
         double frameCaptureMs =
             std::chrono::duration<double, std::milli>(captureEnd - captureStart).count();
-
-        // Queue frame for video encoding
-        EncoderFrame videoFrame;
-        videoFrame.pixels = std::move(pixels);
-        videoFrame.timestampUs = timestampUs;
-        videoFrame.width = dxgiDuplication_ ? captureWidth_ : capture_->processWindowWidth;
-        videoFrame.height = dxgiDuplication_ ? captureHeight_ : capture_->processWindowHeight;
-        videoEncoder_->EncodeFrame(std::move(videoFrame));
 
         // Calculate total frame time
         auto frameEndTime = std::chrono::high_resolution_clock::now();
@@ -460,10 +443,14 @@ void ProcessRecorder::RecordingLoop() {
         double actualFps = elapsed > 0 ? (currentFrame_ * 1000.0) / elapsed : 0.0;
         size_t videoQueueSize = videoEncoder_->GetQueueSize();
 
-        WritePerfData(currentFrame_, timestampUs, totalMs, frameCaptureMs, actualFps,
+        WritePerfData(currentFrame_, frame.timestampUs, totalMs, frameCaptureMs, actualFps,
                       videoQueueSize, droppedFrames_);
+    }
 
-        lastFrameTime = frameEndTime;
+    // Unsubscribe from frame broadcaster
+    if (frameBroadcaster_ && frameSubscriptionId_ != 0) {
+        frameBroadcaster_->Unsubscribe(frameSubscriptionId_);
+        frameSubscriptionId_ = 0;
     }
 
     spdlog::info("Recording loop stopped");
@@ -518,188 +505,3 @@ void ProcessRecorder::MemoryReadingLoop() {
     spdlog::info("Memory reading thread stopped");
 }
 
-bool ProcessRecorder::InitializeDXGICapture(HWND window) {
-    spdlog::info("Initializing DXGI Desktop Duplication capture...");
-
-    targetWindow_ = window;
-
-    // Create D3D11 device
-    D3D_FEATURE_LEVEL featureLevel;
-    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0,
-                                   D3D11_SDK_VERSION, &d3dDevice_, &featureLevel, &d3dContext_);
-
-    if (FAILED(hr)) {
-        spdlog::error("Failed to create D3D11 device: 0x{:X}", hr);
-        return false;
-    }
-
-    // Get DXGI device
-    ComPtr<IDXGIDevice> dxgiDevice;
-    hr = d3dDevice_.As(&dxgiDevice);
-    if (FAILED(hr)) {
-        spdlog::error("Failed to get DXGI device: 0x{:X}", hr);
-        return false;
-    }
-
-    // Get DXGI adapter
-    ComPtr<IDXGIAdapter> dxgiAdapter;
-    hr = dxgiDevice->GetAdapter(&dxgiAdapter);
-    if (FAILED(hr)) {
-        spdlog::error("Failed to get DXGI adapter: 0x{:X}", hr);
-        return false;
-    }
-
-    // Get monitor that contains the window
-    HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTOPRIMARY);
-
-    // Find the output (monitor) that matches
-    ComPtr<IDXGIOutput> dxgiOutput;
-    UINT outputIndex = 0;
-    while (dxgiAdapter->EnumOutputs(outputIndex, &dxgiOutput) != DXGI_ERROR_NOT_FOUND) {
-        DXGI_OUTPUT_DESC outputDesc;
-        dxgiOutput->GetDesc(&outputDesc);
-
-        if (outputDesc.Monitor == monitor) {
-            break;
-        }
-
-        dxgiOutput = nullptr;
-        outputIndex++;
-    }
-
-    if (!dxgiOutput) {
-        spdlog::error("Failed to find DXGI output for window's monitor");
-        return false;
-    }
-
-    // Get IDXGIOutput1
-    ComPtr<IDXGIOutput1> dxgiOutput1;
-    hr = dxgiOutput.As(&dxgiOutput1);
-    if (FAILED(hr)) {
-        spdlog::error("Failed to get IDXGIOutput1: 0x{:X}", hr);
-        return false;
-    }
-
-    // Create desktop duplication
-    hr = dxgiOutput1->DuplicateOutput(d3dDevice_.Get(), &dxgiDuplication_);
-    if (FAILED(hr)) {
-        spdlog::error("Failed to create desktop duplication: 0x{:X}", hr);
-        spdlog::error("Make sure no other desktop duplication is active");
-        return false;
-    }
-
-    // Get duplication description for dimensions
-    DXGI_OUTDUPL_DESC duplDesc;
-    dxgiDuplication_->GetDesc(&duplDesc);
-
-    // Get window size to determine capture area
-    RECT windowRect;
-    GetWindowRect(window, &windowRect);
-    captureWidth_ = windowRect.right - windowRect.left;
-    captureHeight_ = windowRect.bottom - windowRect.top;
-
-    spdlog::info("DXGI Capture initialized: {}x{}", captureWidth_, captureHeight_);
-    spdlog::info("Desktop size: {}x{}", duplDesc.ModeDesc.Width, duplDesc.ModeDesc.Height);
-
-    // Create staging texture for CPU readback
-    D3D11_TEXTURE2D_DESC stagingDesc = {};
-    stagingDesc.Width = captureWidth_;
-    stagingDesc.Height = captureHeight_;
-    stagingDesc.MipLevels = 1;
-    stagingDesc.ArraySize = 1;
-    stagingDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    stagingDesc.SampleDesc.Count = 1;
-    stagingDesc.Usage = D3D11_USAGE_STAGING;
-    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-
-    hr = d3dDevice_->CreateTexture2D(&stagingDesc, nullptr, &stagingTexture_);
-    if (FAILED(hr)) {
-        spdlog::error("Failed to create staging texture: 0x{:X}", hr);
-        return false;
-    }
-
-    spdlog::info("DXGI Desktop Duplication ready for 60fps capture");
-    return true;
-}
-
-void ProcessRecorder::CleanupDXGICapture() {
-    if (dxgiDuplication_) {
-        dxgiDuplication_->ReleaseFrame();
-        dxgiDuplication_ = nullptr;
-    }
-
-    stagingTexture_ = nullptr;
-    d3dContext_ = nullptr;
-    d3dDevice_ = nullptr;
-
-    spdlog::info("DXGI capture cleanup complete");
-}
-
-std::vector<uint8_t> ProcessRecorder::CaptureFrameDXGI() {
-    std::vector<uint8_t> pixels;
-
-    if (!dxgiDuplication_) {
-        return pixels;
-    }
-
-    // Try to acquire next frame (with timeout)
-    ComPtr<IDXGIResource> desktopResource;
-    DXGI_OUTDUPL_FRAME_INFO frameInfo;
-    HRESULT hr = dxgiDuplication_->AcquireNextFrame(0, &frameInfo, &desktopResource);
-
-    if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
-        // No new frame, return empty (we'll use last frame)
-        return pixels;
-    }
-
-    if (FAILED(hr)) {
-        spdlog::warn("AcquireNextFrame failed: 0x{:X}", hr);
-        return pixels;
-    }
-
-    // Get texture from resource
-    ComPtr<ID3D11Texture2D> desktopTexture;
-    hr = desktopResource.As(&desktopTexture);
-    if (FAILED(hr)) {
-        dxgiDuplication_->ReleaseFrame();
-        return pixels;
-    }
-
-    // Get window position on screen
-    RECT windowRect;
-    GetWindowRect(targetWindow_, &windowRect);
-
-    // Copy window region to staging texture
-    D3D11_BOX sourceRegion;
-    sourceRegion.left = windowRect.left;
-    sourceRegion.right = windowRect.right;
-    sourceRegion.top = windowRect.top;
-    sourceRegion.bottom = windowRect.bottom;
-    sourceRegion.front = 0;
-    sourceRegion.back = 1;
-
-    d3dContext_->CopySubresourceRegion(stagingTexture_.Get(), 0, 0, 0, 0, desktopTexture.Get(), 0,
-                                       &sourceRegion);
-
-    // Map staging texture to read pixels
-    D3D11_MAPPED_SUBRESOURCE mapped;
-    hr = d3dContext_->Map(stagingTexture_.Get(), 0, D3D11_MAP_READ, 0, &mapped);
-    if (SUCCEEDED(hr)) {
-        // Copy pixel data
-        pixels.resize(captureWidth_ * captureHeight_ * 4);
-
-        uint8_t *src = static_cast<uint8_t *>(mapped.pData);
-        uint8_t *dst = pixels.data();
-
-        for (int y = 0; y < captureHeight_; y++) {
-            memcpy(dst + y * captureWidth_ * 4, src + y * mapped.RowPitch, captureWidth_ * 4);
-        }
-
-        d3dContext_->Unmap(stagingTexture_.Get(), 0);
-    }
-
-    // Release the frame
-    dxgiDuplication_->ReleaseFrame();
-
-    return pixels;
-}

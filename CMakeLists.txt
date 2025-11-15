@@ -86,6 +86,8 @@ add_executable(siphon
     src/h5_recording_writer.cpp
     src/input_event_logger.cpp
     src/video_encoder.cpp
+    src/frame_broadcaster.cpp
+    src/jpeg_encoder.cpp
     include/dll_injector.h
     include/shared_memory.h
     ${PROTO_SRCS}

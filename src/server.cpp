@@ -1,5 +1,6 @@
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -10,6 +11,8 @@
 #include <string>
 #include <thread>
 
+#include "frame_broadcaster.h"
+#include "jpeg_encoder.h"
 #include "process_attribute.h"
 #include "process_capture.h"
 #include "process_input.h"
@@ -30,6 +33,7 @@ using siphon_service::CaptureFrameRequest;
 using siphon_service::CaptureFrameResponse;
 using siphon_service::DownloadRecordingRequest;
 using siphon_service::ExecuteCommandRequest;
+using siphon_service::FrameData;
 using siphon_service::ExecuteCommandResponse;
 using siphon_service::GetRecordingStatusRequest;
 using siphon_service::GetRecordingStatusResponse;
@@ -60,6 +64,7 @@ using siphon_service::StartRecordingRequest;
 using siphon_service::StartRecordingResponse;
 using siphon_service::StopRecordingRequest;
 using siphon_service::StopRecordingResponse;
+using siphon_service::StreamFramesRequest;
 
 class SiphonServiceImpl final : public SiphonService::Service {
   private:
@@ -67,6 +72,7 @@ class SiphonServiceImpl final : public SiphonService::Service {
     std::unique_ptr<ProcessInput> input_;
     std::unique_ptr<ProcessCapture> capture_;
     std::unique_ptr<ProcessRecorder> recorder_;
+    std::unique_ptr<FrameBroadcaster> frameBroadcaster_;
     mutable std::mutex mutex_;
 
     // Configuration storage
@@ -79,7 +85,8 @@ class SiphonServiceImpl final : public SiphonService::Service {
 
   public:
     SiphonServiceImpl()
-        : memory_(nullptr), input_(nullptr), capture_(nullptr), recorder_(nullptr) {}
+        : memory_(nullptr), input_(nullptr), capture_(nullptr), recorder_(nullptr),
+          frameBroadcaster_(nullptr) {}
 
     Status GetAttribute(ServerContext *context, const GetSiphonRequest *request,
                         GetSiphonResponse *response) override {
@@ -445,6 +452,15 @@ class SiphonServiceImpl final : public SiphonService::Service {
             spdlog::info("Capture initialized successfully! Window size: {}x{}",
                          capture_->processWindowWidth, capture_->processWindowHeight);
 
+            // Also start FrameBroadcaster for streaming
+            frameBroadcaster_ = std::make_unique<FrameBroadcaster>(capture_.get());
+            if (!frameBroadcaster_->Start(processWindow_)) {
+                spdlog::warn("Failed to start FrameBroadcaster (non-critical)");
+                frameBroadcaster_.reset();
+            } else {
+                spdlog::info("FrameBroadcaster started successfully");
+            }
+
             response->set_success(true);
             response->set_message("Capture initialized successfully");
             response->set_window_width(capture_->processWindowWidth);
@@ -453,6 +469,7 @@ class SiphonServiceImpl final : public SiphonService::Service {
         } catch (const std::exception &e) {
             spdlog::error("Exception during capture initialization: {}", e.what());
             capture_.reset();
+            frameBroadcaster_.reset();
             response->set_success(false);
             response->set_message("Exception during capture initialization: " +
                                   std::string(e.what()));
@@ -591,10 +608,16 @@ class SiphonServiceImpl final : public SiphonService::Service {
             return Status::OK;
         }
 
-        // Create recorder if it doesn't exist
+        // Create recorder if it doesn't exist (requires FrameBroadcaster)
         if (!recorder_) {
-            recorder_ =
-                std::make_unique<ProcessRecorder>(capture_.get(), memory_.get(), input_.get());
+            if (!frameBroadcaster_) {
+                spdlog::error("Cannot create recorder: FrameBroadcaster not initialized");
+                response->set_success(false);
+                response->set_message("FrameBroadcaster not initialized");
+                return Status::OK;
+            }
+            recorder_ = std::make_unique<ProcessRecorder>(capture_.get(), memory_.get(),
+                                                          input_.get(), frameBroadcaster_.get());
         }
 
         // Convert repeated field to vector
@@ -800,6 +823,89 @@ class SiphonServiceImpl final : public SiphonService::Service {
             spdlog::warn("Failed to cleanup recording files: {}", e.what());
             // Don't fail the RPC - download was successful
         }
+
+        return Status::OK;
+    }
+
+    Status StreamFrames(ServerContext *context, const StreamFramesRequest *request,
+                        ServerWriter<FrameData> *writer) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!frameBroadcaster_ || !frameBroadcaster_->IsRunning()) {
+            return Status(StatusCode::FAILED_PRECONDITION,
+                          "Capture not initialized or FrameBroadcaster not running");
+        }
+
+        // Parse request parameters
+        std::string format = request->format().empty() ? "jpeg" : request->format();
+        int quality = request->quality() > 0 ? request->quality() : 85;
+
+        spdlog::info("Starting frame stream: format={}, quality={}", format, quality);
+
+        // Subscribe to frames
+        std::atomic<bool> streamActive{true};
+        std::mutex frameMutex;
+        std::condition_variable frameCv;
+        CapturedFrame latestFrame;
+        bool hasFrame = false;
+
+        auto callback = [&](const CapturedFrame &frame) {
+            std::lock_guard<std::mutex> lock(frameMutex);
+            latestFrame = frame;
+            hasFrame = true;
+            frameCv.notify_one();
+        };
+
+        uint64_t subscriptionId = frameBroadcaster_->Subscribe(callback);
+
+        // Stream frames until client disconnects
+        int framesStreamed = 0;
+        while (streamActive && !context->IsCancelled()) {
+            // Wait for next frame
+            std::unique_lock<std::mutex> lock(frameMutex);
+            if (!frameCv.wait_for(lock, std::chrono::milliseconds(100),
+                                  [&] { return hasFrame; })) {
+                continue; // Timeout, check if cancelled
+            }
+
+            CapturedFrame frame = latestFrame;
+            hasFrame = false;
+            lock.unlock();
+
+            // Prepare frame data message
+            FrameData frameMsg;
+            frameMsg.set_timestamp_us(frame.timestampUs);
+            frameMsg.set_width(frame.width);
+            frameMsg.set_height(frame.height);
+            frameMsg.set_frame_number(frame.frameNumber);
+            frameMsg.set_format(format);
+
+            // Encode frame based on format
+            if (format == "jpeg") {
+                auto jpegData =
+                    JpegEncoder::EncodeBGRA(frame.pixels.data(), frame.width, frame.height, quality);
+                if (jpegData.empty()) {
+                    spdlog::error("Failed to encode frame to JPEG");
+                    continue;
+                }
+                frameMsg.set_data(jpegData.data(), jpegData.size());
+            } else {
+                // Raw BGRA format
+                frameMsg.set_data(frame.pixels.data(), frame.pixels.size());
+            }
+
+            // Send frame to client
+            if (!writer->Write(frameMsg)) {
+                spdlog::info("Client disconnected from stream after {} frames", framesStreamed);
+                break;
+            }
+
+            framesStreamed++;
+        }
+
+        // Unsubscribe
+        frameBroadcaster_->Unsubscribe(subscriptionId);
+        spdlog::info("Frame stream ended: {} frames streamed", framesStreamed);
 
         return Status::OK;
     }

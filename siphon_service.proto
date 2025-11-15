@@ -36,6 +36,9 @@ service SiphonService {
   rpc StopRecording(StopRecordingRequest) returns (StopRecordingResponse);
   rpc GetRecordingStatus(GetRecordingStatusRequest) returns (GetRecordingStatusResponse);
   rpc DownloadRecording(DownloadRecordingRequest) returns (stream RecordingChunk);
+
+  // Frame streaming endpoint
+  rpc StreamFrames(StreamFramesRequest) returns (stream FrameData);
 }
 
 // Request message for getting variable
@@ -281,4 +284,19 @@ message RecordingChunk {
   uint64 total_size = 3;    // Total file size
   bool is_final = 4;        // True for last chunk
   string filename = 5;      // Filename (e.g., "recording.h5")
+}
+
+// Frame streaming
+message StreamFramesRequest {
+  string format = 1;        // "jpeg" or "raw" (default: jpeg)
+  int32 quality = 2;        // JPEG quality 1-100 (default: 85)
+}
+
+message FrameData {
+  bytes data = 1;           // JPEG or raw BGRA pixel data
+  int64 timestamp_us = 2;   // Frame timestamp in microseconds
+  int32 width = 3;          // Frame width
+  int32 height = 4;         // Frame height
+  int32 frame_number = 5;   // Sequential frame number
+  string format = 6;        // "jpeg" or "raw"
 }

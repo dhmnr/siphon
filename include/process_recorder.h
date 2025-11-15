@@ -1,5 +1,6 @@
 #pragma once
 
+#include "frame_broadcaster.h"
 #include "input_event_logger.h"
 #include "interception.h"
 #include "process_attribute.h"
@@ -9,8 +10,6 @@
 #include "video_encoder.h"
 #include <atomic>
 #include <chrono>
-#include <d3d11.h>
-#include <dxgi1_2.h>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -19,9 +18,6 @@
 #include <thread>
 #include <vector>
 #include <windows.h>
-#include <wrl/client.h>
-
-using Microsoft::WRL::ComPtr;
 
 // Structure for memory data per frame
 struct MemoryFrameData {
@@ -48,6 +44,7 @@ class ProcessRecorder {
     ProcessCapture *capture_;
     ProcessMemory *memory_;
     ProcessInput *input_;
+    FrameBroadcaster *frameBroadcaster_;
 
     // Recording state
     std::atomic<bool> isRecording_;
@@ -82,14 +79,11 @@ class ProcessRecorder {
     std::ofstream perfFile_;
     std::mutex perfMutex_;
 
-    // DXGI Desktop Duplication for recording
-    ComPtr<ID3D11Device> d3dDevice_;
-    ComPtr<ID3D11DeviceContext> d3dContext_;
-    ComPtr<IDXGIOutputDuplication> dxgiDuplication_;
-    ComPtr<ID3D11Texture2D> stagingTexture_;
-    int captureWidth_;
-    int captureHeight_;
-    HWND targetWindow_;
+    // Frame subscription
+    uint64_t frameSubscriptionId_;
+    std::atomic<bool> hasNewFrame_;
+    std::mutex frameMutex_;
+    CapturedFrame latestFrame_;
 
     // Private methods
     void RecordingLoop();
@@ -101,12 +95,10 @@ class ProcessRecorder {
                        size_t queueSize, int dropped);
     std::string GenerateSessionId();
     bool CreateOutputDirectories();
-    bool InitializeDXGICapture(HWND window);
-    void CleanupDXGICapture();
-    std::vector<uint8_t> CaptureFrameDXGI();
 
   public:
-    ProcessRecorder(ProcessCapture *capture, ProcessMemory *memory, ProcessInput *input);
+    ProcessRecorder(ProcessCapture *capture, ProcessMemory *memory, ProcessInput *input,
+                    FrameBroadcaster *frameBroadcaster);
     ~ProcessRecorder();
 
     // Main API

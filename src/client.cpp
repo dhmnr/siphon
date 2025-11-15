@@ -23,6 +23,7 @@ using siphon_service::CaptureFrameResponse;
 using siphon_service::DownloadRecordingRequest;
 using siphon_service::ExecuteCommandRequest;
 using siphon_service::ExecuteCommandResponse;
+using siphon_service::FrameData;
 using siphon_service::GetRecordingStatusRequest;
 using siphon_service::GetRecordingStatusResponse;
 using siphon_service::GetServerStatusRequest;
@@ -52,6 +53,7 @@ using siphon_service::StartRecordingRequest;
 using siphon_service::StartRecordingResponse;
 using siphon_service::StopRecordingRequest;
 using siphon_service::StopRecordingResponse;
+using siphon_service::StreamFramesRequest;
 
 // Helper function to parse TOML config and build protobuf request
 bool ParseConfigFile(const std::string &filepath, std::string &processName,
@@ -641,6 +643,164 @@ class SiphonClient {
         return result;
     }
 
+    // Thread-safe frame buffer for non-blocking streaming
+    struct FrameStreamHandle {
+        std::atomic<bool> isRunning{true};
+        std::thread streamThread;
+        std::mutex frameMutex;
+        siphon_service::FrameData latestFrame;
+        std::atomic<bool> hasNewFrame{false};
+        std::atomic<int> framesReceived{0};
+        std::chrono::high_resolution_clock::time_point startTime;
+
+        ~FrameStreamHandle() {
+            isRunning = false;
+            if (streamThread.joinable()) {
+                streamThread.join();
+            }
+        }
+    };
+
+    // Non-blocking streaming: returns a handle you can poll for frames
+    std::shared_ptr<FrameStreamHandle> StartFrameStream(const std::string &format = "jpeg",
+                                                        int quality = 85) {
+        auto handle = std::make_shared<FrameStreamHandle>();
+        handle->startTime = std::chrono::high_resolution_clock::now();
+
+        // Start background thread to receive frames
+        handle->streamThread = std::thread([this, handle, format, quality]() {
+            StreamFramesRequest request;
+            ClientContext context;
+
+            request.set_format(format);
+            request.set_quality(quality);
+
+            std::unique_ptr<grpc::ClientReader<siphon_service::FrameData>> reader(
+                stub_->StreamFrames(&context, request));
+
+            std::cout << "Frame stream started (" << format << ", quality=" << quality << ")"
+                      << std::endl;
+
+            siphon_service::FrameData frameData;
+            while (handle->isRunning && reader->Read(&frameData)) {
+                std::lock_guard<std::mutex> lock(handle->frameMutex);
+                handle->latestFrame = frameData;
+                handle->hasNewFrame = true;
+                handle->framesReceived++;
+            }
+
+            Status status = reader->Finish();
+            if (!status.ok() && status.error_code() != grpc::StatusCode::CANCELLED) {
+                std::cerr << "Stream error: " << status.error_message() << std::endl;
+            }
+        });
+
+        return handle;
+    }
+
+    // Get latest frame from stream (non-blocking)
+    bool GetLatestFrame(std::shared_ptr<FrameStreamHandle> handle,
+                        siphon_service::FrameData &outFrame) {
+        if (!handle || !handle->hasNewFrame) {
+            return false;
+        }
+
+        std::lock_guard<std::mutex> lock(handle->frameMutex);
+        outFrame = handle->latestFrame;
+        handle->hasNewFrame = false; // Mark as consumed
+        return true;
+    }
+
+    // Stop frame stream
+    void StopFrameStream(std::shared_ptr<FrameStreamHandle> handle) {
+        if (handle) {
+            handle->isRunning = false;
+        }
+    }
+
+    // Blocking streaming (original function - kept for backwards compatibility)
+    bool StreamFrames(const std::string &format = "jpeg", int quality = 85, int maxFrames = 0) {
+        StreamFramesRequest request;
+        ClientContext context;
+
+        request.set_format(format);
+        request.set_quality(quality);
+
+        std::unique_ptr<grpc::ClientReader<siphon_service::FrameData>> reader(
+            stub_->StreamFrames(&context, request));
+
+        std::cout << "Starting frame stream (" << format << ", quality=" << quality << ")"
+                  << std::endl;
+        std::cout << "Press Ctrl+C to stop streaming" << std::endl;
+
+        siphon_service::FrameData frameData;
+        int framesReceived = 0;
+        auto startTime = std::chrono::high_resolution_clock::now();
+        auto lastPrintTime = startTime;
+
+        while (reader->Read(&frameData)) {
+            framesReceived++;
+
+            auto now = std::chrono::high_resolution_clock::now();
+            auto elapsedSinceStart = std::chrono::duration<double>(now - startTime).count();
+            auto elapsedSincePrint = std::chrono::duration<double>(now - lastPrintTime).count();
+
+            // Print status every second
+            if (elapsedSincePrint >= 1.0) {
+                double avgFps = framesReceived / elapsedSinceStart;
+                double dataSize = frameData.data().size() / 1024.0; // KB
+
+                std::cout << "\rFrames: " << framesReceived << " | FPS: " << std::fixed
+                          << std::setprecision(1) << avgFps << " | Size: " << frameData.width()
+                          << "x" << frameData.height() << " | Frame #" << frameData.frame_number()
+                          << " | Data: " << std::fixed << std::setprecision(1) << dataSize << " KB"
+                          << std::flush;
+                lastPrintTime = now;
+            }
+
+            // Optional: save frames to disk (every Nth frame to avoid flooding disk)
+            // You can uncomment this to save frames
+            /*
+            if (framesReceived % 15 == 0) {  // Save every 15th frame (~1 per second)
+                std::string filename = "frame_" + std::to_string(framesReceived) +
+                                       (format == "jpeg" ? ".jpg" : ".raw");
+                std::ofstream outFile(filename, std::ios::binary);
+                if (outFile.is_open()) {
+                    outFile.write(frameData.data().data(), frameData.data().size());
+                    outFile.close();
+                }
+            }
+            */
+
+            // Stop after max frames if specified
+            if (maxFrames > 0 && framesReceived >= maxFrames) {
+                std::cout << "\nReached max frames limit: " << maxFrames << std::endl;
+                context.TryCancel();
+                break;
+            }
+        }
+
+        std::cout << std::endl; // New line after status updates
+
+        Status status = reader->Finish();
+        if (status.ok() || status.error_code() == grpc::StatusCode::CANCELLED) {
+            auto endTime = std::chrono::high_resolution_clock::now();
+            double totalTime = std::chrono::duration<double>(endTime - startTime).count();
+            double avgFps = framesReceived / totalTime;
+
+            std::cout << "\n=== Streaming Complete ===" << std::endl;
+            std::cout << "Total frames received: " << framesReceived << std::endl;
+            std::cout << "Duration: " << std::fixed << std::setprecision(2) << totalTime << "s"
+                      << std::endl;
+            std::cout << "Average FPS: " << std::fixed << std::setprecision(2) << avgFps
+                      << std::endl;
+            return true;
+        } else {
+            std::cerr << "Streaming failed: " << status.error_message() << std::endl;
+            return false;
+        }
+    }
+
     bool DownloadRecording(const std::string &sessionId, const std::string &outputDir) {
         DownloadRecordingRequest request;
         ClientContext context;
@@ -807,6 +967,14 @@ int main() {
     std::cout << "  rec-status <session_id>   - Get recording status" << std::endl;
     std::cout << "  rec-download <session_id> <output_directory>" << std::endl;
     std::cout << "                            - Download recording files (video, inputs, memory)"
+              << std::endl;
+    std::cout << "\n=== Streaming Commands ===" << std::endl;
+    std::cout << "  stream [format] [quality] [max_frames]" << std::endl;
+    std::cout << "                            - Stream frames (format: jpeg/raw, quality: 1-100, "
+                 "max_frames: 0=unlimited)"
+              << std::endl;
+    std::cout << "  stream-loop [format] [quality] [duration_sec]" << std::endl;
+    std::cout << "                            - Non-blocking stream with control loop example"
               << std::endl;
     std::cout << "\n=== General ===" << std::endl;
     std::cout << "  quit                      - Exit client" << std::endl;
@@ -1316,6 +1484,129 @@ int main() {
                 std::cin.clear();
                 std::cin.ignore(10000, '\n');
             }
+        } else if (command == "stream") {
+            std::string format = "jpeg";
+            int quality = 85;
+            int maxFrames = 0;
+
+            // Optional parameters
+            if (std::cin.peek() != '\n') {
+                std::cin >> format;
+                if (std::cin.peek() != '\n') {
+                    std::cin >> quality;
+                    if (std::cin.peek() != '\n') {
+                        std::cin >> maxFrames;
+                    }
+                }
+            }
+
+            std::cout << "Starting frame stream..." << std::endl;
+            std::cout << "  Format: " << format << std::endl;
+            std::cout << "  Quality: " << quality << std::endl;
+            std::cout << "  Max frames: "
+                      << (maxFrames == 0 ? "unlimited" : std::to_string(maxFrames)) << std::endl;
+
+            if (!client.StreamFrames(format, quality, maxFrames)) {
+                std::cout << "Failed to stream frames" << std::endl;
+            }
+        } else if (command == "stream-loop") {
+            std::string format = "jpeg";
+            int quality = 85;
+            int durationSec = 10;
+
+            // Optional parameters
+            if (std::cin.peek() != '\n') {
+                std::cin >> format;
+                if (std::cin.peek() != '\n') {
+                    std::cin >> quality;
+                    if (std::cin.peek() != '\n') {
+                        std::cin >> durationSec;
+                    }
+                }
+            }
+
+            std::cout << "\n=== Starting Non-Blocking Frame Stream Control Loop ===" << std::endl;
+            std::cout << "Format: " << format << std::endl;
+            std::cout << "Quality: " << quality << std::endl;
+            std::cout << "Duration: " << durationSec << "s" << std::endl;
+            std::cout << "\nThis demonstrates a control loop where you can:" << std::endl;
+            std::cout << "  - Receive frames continuously in background" << std::endl;
+            std::cout << "  - Process each frame (add your AI/logic here)" << std::endl;
+            std::cout << "  - Send input commands based on processing" << std::endl;
+            std::cout << "\nPress Ctrl+C to stop early\n" << std::endl;
+
+            // Start non-blocking frame stream
+            auto streamHandle = client.StartFrameStream(format, quality);
+
+            auto startTime = std::chrono::high_resolution_clock::now();
+            int framesProcessed = 0;
+            int commandsSent = 0;
+
+            // Main control loop - this is where you'd add your AI/processing logic
+            while (true) {
+                // Check if duration elapsed
+                auto now = std::chrono::high_resolution_clock::now();
+                double elapsed = std::chrono::duration<double>(now - startTime).count();
+                if (elapsed >= durationSec) {
+                    break;
+                }
+
+                // Get latest frame (non-blocking)
+                siphon_service::FrameData frame;
+                if (client.GetLatestFrame(streamHandle, frame)) {
+                    framesProcessed++;
+
+                    // === YOUR PROCESSING LOGIC GOES HERE ===
+                    // Example: Simple demonstration logic
+                    // In real use, you'd run your AI model, computer vision, etc.
+
+                    // Log frame info every 15 frames
+                    if (framesProcessed % 15 == 0) {
+                        double fps = framesProcessed / elapsed;
+                        std::cout << "\rFrame #" << frame.frame_number()
+                                  << " | Size: " << frame.width() << "x" << frame.height()
+                                  << " | FPS: " << std::fixed << std::setprecision(1) << fps
+                                  << " | Commands sent: " << commandsSent << std::flush;
+                    }
+
+                    // Example: Send a keystroke every 30 frames (every ~2 seconds at 15fps)
+                    if (framesProcessed % 30 == 0) {
+                        // Uncomment to actually send inputs:
+                        // client.InputKeyTap({"w"}, "50", "0");  // Press 'w' for 50ms
+                        commandsSent++;
+                    }
+
+                    // Example: You could decode JPEG and analyze pixels:
+                    // - Use OpenCV/stb_image to decode frame.data()
+                    // - Run object detection, OCR, etc.
+                    // - Make decisions based on what you see
+                    // - Send appropriate inputs
+
+                } else {
+                    // No new frame yet, sleep briefly to avoid busy-waiting
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+
+                // You can also send commands independently of frames:
+                // client.GetAttribute("player_health");
+                // client.SetAttribute("some_value", "int", "100");
+            }
+
+            std::cout << std::endl;
+
+            // Stop streaming
+            client.StopFrameStream(streamHandle);
+
+            auto endTime = std::chrono::high_resolution_clock::now();
+            double totalTime = std::chrono::duration<double>(endTime - startTime).count();
+
+            std::cout << "\n=== Control Loop Complete ===" << std::endl;
+            std::cout << "Duration: " << std::fixed << std::setprecision(2) << totalTime << "s"
+                      << std::endl;
+            std::cout << "Frames processed: " << framesProcessed << std::endl;
+            std::cout << "Average FPS: " << std::fixed << std::setprecision(2)
+                      << (framesProcessed / totalTime) << std::endl;
+            std::cout << "Commands sent: " << commandsSent << std::endl;
         } else {
             std::cout << "Unknown command. Type 'quit' to exit or see commands above." << std::endl;
         }
