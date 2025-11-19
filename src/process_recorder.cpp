@@ -460,7 +460,7 @@ void ProcessRecorder::MemoryReadingLoop() {
     spdlog::info("Memory reading thread started");
 
     while (!shouldStop_) {
-        auto wallClockTime = std::chrono::system_clock::now();
+        auto wallClockTime = std::chrono::high_resolution_clock::now();
         int64_t timestampUs =
             std::chrono::duration_cast<std::chrono::microseconds>(wallClockTime.time_since_epoch())
                 .count();
