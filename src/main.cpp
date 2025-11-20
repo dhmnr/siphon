@@ -27,7 +27,8 @@ void InitLogger(bool use_stdout) {
     }
 
     spdlog::set_default_logger(logger);
-    spdlog::set_level(spdlog::level::debug);
+    // Set to info for clean logs, change to debug for detailed troubleshooting
+    spdlog::set_level(spdlog::level::info);  // Options: trace, debug, info, warn, err, critical
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [%t] %v");
     spdlog::flush_every(std::chrono::seconds(3));
     spdlog::flush_on(spdlog::level::warn);

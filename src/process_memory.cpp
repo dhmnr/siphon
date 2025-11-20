@@ -131,8 +131,7 @@ uintptr_t ProcessMemory::AOBScan(const std::string &pattern, std::vector<bool> w
         return 0;
     }
 
-    spdlog::info("Scanning for pattern: {}", pattern);
-    spdlog::info("Pattern length: {} bytes", patternBytes.size());
+    spdlog::debug("AOB scan: pattern={}, length={} bytes", pattern, patternBytes.size());
 
     const size_t chunkSize = 0x10000; // 64KB chunks
     std::vector<uint8_t> buffer(chunkSize);
@@ -158,15 +157,15 @@ uintptr_t ProcessMemory::AOBScan(const std::string &pattern, std::vector<bool> w
 
             if (found) {
                 uintptr_t foundAddress = currentAddress + i;
-                spdlog::info("Pattern found at: 0x{:x}", foundAddress);
+                spdlog::debug("AOB pattern found at: 0x{:x}", foundAddress);
                 return foundAddress;
             }
         }
 
-        // Progress indicator
-        if (offset % 0x100000 == 0) { // Every 1MB
-            spdlog::info("Scanned: {}%", (offset * 100) / moduleSize);
-        }
+        // Progress indicator (disabled to reduce log spam)
+        // if (offset % 0x100000 == 0) { // Every 1MB
+        //     spdlog::debug("Scanned: {}%", (offset * 100) / moduleSize);
+        // }
     }
 
     spdlog::error("Pattern not found!");
@@ -194,8 +193,7 @@ uintptr_t ProcessMemory::FindPtrFromAOB(const std::string &pattern) {
     int32_t offset = *reinterpret_cast<int32_t *>(&instruction[addressStartIndex]);
     uintptr_t targetAddress = instructionAddress + 7 + offset; // 7 = instruction length
 
-    spdlog::info("Found mov instruction with RIP-relative addressing");
-    spdlog::info("Target address: 0x{:x}", targetAddress);
+    spdlog::debug("RIP-relative mov instruction -> target: 0x{:x}", targetAddress);
 
     // Read the actual pointer value
     uintptr_t ptrAddress;
@@ -205,7 +203,7 @@ uintptr_t ProcessMemory::FindPtrFromAOB(const std::string &pattern) {
         return 0;
     }
 
-    spdlog::info("Pointer found at: 0x{:x}", ptrAddress);
+    spdlog::debug("Extracted pointer: 0x{:x}", ptrAddress);
     return ptrAddress;
 }
 
@@ -224,18 +222,18 @@ uintptr_t ProcessMemory::FindPtrFromDll(const std::string &pattern) {
     //     }
     // }
     if (dllInjected) {
-        spdlog::info("DLL already injected, waiting for shared memory...");
+        spdlog::debug("Reusing DLL, connecting to shared memory...");
         bool connected = false;
         for (int i = 0; i < 20; i++) {
             if (sharedMem.OpenShared()) {
-                spdlog::info("Connected to shared memory!");
+                spdlog::debug("Shared memory connected");
                 connected = true;
                 break;
             }
             Sleep(500);
         }
         if (!connected) {
-            spdlog::error("Error: Failed to connect to shared memory");
+            spdlog::error("Failed to connect to shared memory");
             return 0;
         }
         return (uintptr_t)sharedMem.data->npcPointer;
@@ -324,7 +322,7 @@ uintptr_t ProcessMemory::FindPtrFromDll(const std::string &pattern) {
         if (sharedMem.data->npcPointer) {
             spdlog::info("NPC Pointer: 0x{:x}", (uintptr_t)sharedMem.data->npcPointer);
 
-            spdlog::info("Pointer found at: 0x{:x}", sharedMem.data->npcPointer);
+            spdlog::debug("NPC pointer from DLL: 0x{:x}", sharedMem.data->npcPointer);
 
             // injectedAddresses[pattern] = (uintptr_t)sharedMem.data->npcPointer;
             // spdlog::info("Cached address: 0x{:x}, pattern: {}", injectedAddresses[pattern],
@@ -401,36 +399,31 @@ bool ProcessMemory::WriteArray(uintptr_t address, const std::vector<uint8_t> &va
 uintptr_t ProcessMemory::ResolvePointerChain(uintptr_t baseAddress,
                                              const std::vector<uintptr_t> &offsets) {
     uintptr_t currentAddress = baseAddress;
-    // TODO : Error handling
-    spdlog::info("Starting pointer chain resolution:");
-    spdlog::info("Base: 0x{:x}", currentAddress);
+    
+    spdlog::debug("Pointer chain: Base=0x{:x}, Offsets={}", currentAddress, offsets.size());
 
     for (size_t i = 0; i < offsets.size() - 1; ++i) {
         if (currentAddress == 0) {
-            spdlog::error("Null pointer encountered at level {}", i);
+            spdlog::error("Null pointer at level {}", i);
             return 0;
         }
 
-        // First add the offset to current address
         uintptr_t addressToRead = currentAddress + offsets[i];
-        spdlog::info("0x{:x} + 0x{:x} = 0x{:x}", currentAddress, offsets[i], addressToRead);
+        spdlog::debug("  [{}] 0x{:x}+0x{:x}=0x{:x}", i, currentAddress, offsets[i], addressToRead);
 
-        // Then read the pointer at that address
         uintptr_t nextAddress;
         if (!ReadPtr(addressToRead, nextAddress)) {
-            spdlog::error(" -> Failed to read pointer");
+            spdlog::error("Failed to read pointer at level {}", i);
             return 0;
         }
 
-        spdlog::info(" -> 0x{:x}", nextAddress);
+        spdlog::debug("    -> 0x{:x}", nextAddress);
         currentAddress = nextAddress;
     }
 
     uintptr_t finalAddress = currentAddress + offsets[offsets.size() - 1];
-    spdlog::info("0x{:x} + 0x{:x} = 0x{:x}", currentAddress, offsets[offsets.size() - 1],
-                 finalAddress);
+    spdlog::debug("  Final: 0x{:x}+0x{:x}=0x{:x}", currentAddress, offsets[offsets.size() - 1], finalAddress);
 
-    spdlog::info("Final address: 0x{:x}", finalAddress);
     return finalAddress;
 }
 
@@ -442,17 +435,16 @@ bool ProcessMemory::ExtractAttributeInt(std::string attributeName, int32_t &valu
     uintptr_t ptr;
     if (processAttributes[attributeName].AttributeMethod == "dll") {
         ptr = FindPtrFromDll(processAttributes[attributeName].AttributePattern);
-        spdlog::info("Pointer found at: 0x{:x}", ptr);
     } else {
         ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
-        spdlog::info("Pointer found at: 0x{:x}", ptr);
     }
 
     uintptr_t attributeAddress =
         ResolvePointerChain(ptr, processAttributes[attributeName].AttributeOffsets);
-    spdlog::info("{} found at: 0x{:x}", attributeName, attributeAddress);
 
-    return ReadInt(attributeAddress, value);
+    bool success = ReadInt(attributeAddress, value);
+    spdlog::debug("Read {}: base=0x{:x} -> addr=0x{:x}, value={}, ok={}", attributeName, ptr, attributeAddress, value, success);
+    return success;
 }
 
 bool ProcessMemory::WriteAttributeInt(std::string attributeName, const int32_t &value) {
@@ -463,19 +455,16 @@ bool ProcessMemory::WriteAttributeInt(std::string attributeName, const int32_t &
     uintptr_t ptr;
     if (processAttributes[attributeName].AttributeMethod == "dll") {
         ptr = FindPtrFromDll(processAttributes[attributeName].AttributePattern);
-        spdlog::info("Pointer found at: 0x{:x}", ptr);
     } else {
         ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
-        spdlog::info("Pointer found at: 0x{:x}", ptr);
     }
-
-    spdlog::info("Pointer found at: 0x{:x}", ptr);
 
     uintptr_t attributeAddress =
         ResolvePointerChain(ptr, processAttributes[attributeName].AttributeOffsets);
-    spdlog::info("{} found at: 0x{:x}", attributeName, attributeAddress);
 
-    return WriteInt(attributeAddress, value);
+    bool success = WriteInt(attributeAddress, value);
+    spdlog::info("Write {}: addr=0x{:x}, value={}, ok={}", attributeName, attributeAddress, value, success);
+    return success;
 }
 
 bool ProcessMemory::ExtractAttributeFloat(std::string attributeName, float &value) {
@@ -486,23 +475,16 @@ bool ProcessMemory::ExtractAttributeFloat(std::string attributeName, float &valu
     uintptr_t ptr;
     if (processAttributes[attributeName].AttributeMethod == "dll") {
         ptr = FindPtrFromDll(processAttributes[attributeName].AttributePattern);
-        spdlog::info("Pointer found at: 0x{:x}", ptr);
     } else {
         ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
-        spdlog::info("Pointer found at: 0x{:x}", ptr);
     }
-    spdlog::info("Pointer found at: 0x{:x}", ptr);
 
     uintptr_t attributeAddress =
         ResolvePointerChain(ptr, processAttributes[attributeName].AttributeOffsets);
-    spdlog::info("{} found at: 0x{:x}", attributeName, attributeAddress);
 
-    if (!ReadFloat(attributeAddress, value)) {
-        return false;
-    }
-    spdlog::info("{} value: {}", attributeName, value);
-
-    return true;
+    bool success = ReadFloat(attributeAddress, value);
+    spdlog::debug("Read {}: base=0x{:x} -> addr=0x{:x}, value={:.3f}, ok={}", attributeName, ptr, attributeAddress, value, success);
+    return success;
 }
 
 bool ProcessMemory::WriteAttributeFloat(std::string attributeName, const float &value) {
@@ -514,18 +496,16 @@ bool ProcessMemory::WriteAttributeFloat(std::string attributeName, const float &
     uintptr_t ptr;
     if (processAttributes[attributeName].AttributeMethod == "dll") {
         ptr = FindPtrFromDll(processAttributes[attributeName].AttributePattern);
-        spdlog::info("Pointer found at: 0x{:x}", ptr);
     } else {
         ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
-        spdlog::info("Pointer found at: 0x{:x}", ptr);
     }
-    spdlog::info("Pointer found at: 0x{:x}", ptr);
 
     uintptr_t attributeAddress =
         ResolvePointerChain(ptr, processAttributes[attributeName].AttributeOffsets);
-    spdlog::info("{} found at: 0x{:x}", attributeName, attributeAddress);
 
-    return WriteFloat(attributeAddress, value);
+    bool success = WriteFloat(attributeAddress, value);
+    spdlog::info("Write {}: addr=0x{:x}, value={:.3f}, ok={}", attributeName, attributeAddress, value, success);
+    return success;
 }
 
 bool ProcessMemory::ExtractAttributeArray(std::string attributeName, std::vector<uint8_t> &value) {
@@ -539,23 +519,16 @@ bool ProcessMemory::ExtractAttributeArray(std::string attributeName, std::vector
     uintptr_t ptr;
     if (processAttributes[attributeName].AttributeMethod == "dll") {
         ptr = FindPtrFromDll(processAttributes[attributeName].AttributePattern);
-        spdlog::info("Pointer found at: 0x{:x}", ptr);
     } else {
         ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
-        spdlog::info("Pointer found at: 0x{:x}", ptr);
     }
-    spdlog::info("Pointer found at: 0x{:x}", ptr);
 
     uintptr_t attributeAddress =
         ResolvePointerChain(ptr, processAttributes[attributeName].AttributeOffsets);
-    spdlog::info("{} found at: 0x{:x}", attributeName, attributeAddress);
 
-    if (!ReadArray(attributeAddress, value)) {
-        return false;
-    }
-    spdlog::info("{} value: [{} bytes]", attributeName, value.size());
-
-    return true;
+    bool success = ReadArray(attributeAddress, value);
+    spdlog::debug("Read {}: base=0x{:x} -> addr=0x{:x}, size={}, ok={}", attributeName, ptr, attributeAddress, value.size(), success);
+    return success;
 }
 
 bool ProcessMemory::WriteAttributeArray(std::string attributeName,
@@ -568,18 +541,16 @@ bool ProcessMemory::WriteAttributeArray(std::string attributeName,
     uintptr_t ptr;
     if (processAttributes[attributeName].AttributeMethod == "dll") {
         ptr = FindPtrFromDll(processAttributes[attributeName].AttributePattern);
-        spdlog::info("Pointer found at: 0x{:x}", ptr);
     } else {
         ptr = FindPtrFromAOB(processAttributes[attributeName].AttributePattern);
-        spdlog::info("Pointer found at: 0x{:x}", ptr);
     }
-    spdlog::info("Pointer found at: 0x{:x}", ptr);
 
     uintptr_t attributeAddress =
         ResolvePointerChain(ptr, processAttributes[attributeName].AttributeOffsets);
-    spdlog::info("{} found at: 0x{:x}", attributeName, attributeAddress);
 
-    return WriteArray(attributeAddress, value);
+    bool success = WriteArray(attributeAddress, value);
+    spdlog::info("Write {}: addr=0x{:x}, size={}, ok={}", attributeName, attributeAddress, value.size(), success);
+    return success;
 }
 
 ProcessAttribute ProcessMemory::GetAttribute(std::string attributeName) {

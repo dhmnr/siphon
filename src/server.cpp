@@ -91,6 +91,8 @@ class SiphonServiceImpl final : public SiphonService::Service {
     Status GetAttribute(ServerContext *context, const GetSiphonRequest *request,
                         GetSiphonResponse *response) override {
         std::lock_guard<std::mutex> lock(mutex_);
+        
+        spdlog::info("RPC GetAttribute: attr={}", request->attributename());
 
         if (memory_ == nullptr) { // Changed from != 0
             spdlog::error("Memory not initialized or {} address not found",
@@ -146,8 +148,7 @@ class SiphonServiceImpl final : public SiphonService::Service {
 
         response->set_success(true);
         response->set_message(request->attributename() + " read successfully");
-        spdlog::info("GetAttribute called - returning {} : {}", request->attributename(),
-                     attributeValueStr);
+        spdlog::info("RPC GetAttribute result: {}={}", request->attributename(), attributeValueStr);
 
         return Status::OK;
     }
@@ -155,6 +156,8 @@ class SiphonServiceImpl final : public SiphonService::Service {
     Status SetAttribute(ServerContext *context, const SetSiphonRequest *request,
                         SetSiphonResponse *response) override {
         std::lock_guard<std::mutex> lock(mutex_);
+        
+        spdlog::info("RPC SetAttribute: attr={}", request->attributename());
 
         if (memory_ == nullptr) {
             spdlog::error("Memory not initialized");
