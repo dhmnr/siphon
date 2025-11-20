@@ -279,13 +279,18 @@ uintptr_t ProcessMemory::FindPtrFromDll(const std::string &pattern) {
     }
     spdlog::info("DLL path: {}", dllPath.string().c_str());
 
-    // 3. Inject DLL
-    spdlog::info("Injecting DLL...");
-    if (!InjectDLL(processId, dllPath.string().c_str())) {
-        spdlog::error("Error: Failed to inject DLL!");
-        return 1;
+    // 3. Inject DLL (check if already loaded first)
+    bool alreadyLoaded = IsDllLoadedInProcess(processId, dllPath.string().c_str());
+    if (alreadyLoaded) {
+        spdlog::info("DLL already loaded in target process, skipping injection");
+    } else {
+        spdlog::info("Injecting DLL...");
+        if (!InjectDLL(processId, dllPath.string().c_str())) {
+            spdlog::error("Error: Failed to inject DLL!");
+            return 1;
+        }
+        spdlog::info("DLL injected successfully!");
     }
-    spdlog::info("DLL injected successfully!");
 
     // 4. Wait for shared memory
     spdlog::info("Waiting for shared memory...");

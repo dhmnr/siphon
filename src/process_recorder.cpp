@@ -141,6 +141,12 @@ bool ProcessRecorder::StartRecording(const std::vector<std::string> &attributeNa
                              std::chrono::system_clock::now().time_since_epoch())
                              .count();
 
+    // Recreate video encoder if it was used before (to allow multiple recording sessions)
+    if (videoEncoder_) {
+        videoEncoder_.reset();
+    }
+    videoEncoder_ = std::make_unique<VideoEncoder>();
+
     // Initialize video encoder using capture dimensions
     try {
         std::string videoPath = (fs::path(outputDirectory_) / sessionId_ / "video.mp4").string();
@@ -180,11 +186,27 @@ bool ProcessRecorder::StartRecording(const std::vector<std::string> &attributeNa
     WritePerfHeader();
     spdlog::info("Initialized perf data CSV: {}", perfPath);
 
+    // Recreate input logger if it was used before (to allow multiple recording sessions)
+    if (inputLogger_) {
+        if (inputLogger_->IsLogging()) {
+            inputLogger_->StopLogging();
+        }
+        inputLogger_.reset();
+    }
+    inputLogger_ = std::make_unique<InputEventLogger>();
+
     // Start input event logger (independent of video recording)
     std::string inputLogPath = (fs::path(outputDirectory_) / sessionId_ / "inputs.csv").string();
     if (!inputLogger_->StartLogging(inputLogPath)) {
         spdlog::error("Failed to start input event logger");
         return false;
+    }
+
+    // Unsubscribe from previous frame broadcaster subscription if any
+    if (frameBroadcaster_ && frameSubscriptionId_ != 0) {
+        frameBroadcaster_->Unsubscribe(frameSubscriptionId_);
+        frameSubscriptionId_ = 0;
+        spdlog::info("Unsubscribed from previous frame broadcaster session");
     }
 
     // Start recording threads

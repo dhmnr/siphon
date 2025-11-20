@@ -1,6 +1,8 @@
 #pragma once
 #include <TlHelp32.h>
 #include <Windows.h>
+#include <Psapi.h>
+#include <string>
 
 
 DWORD GetProcessIdByName(const wchar_t *processName) {
@@ -84,4 +86,37 @@ bool InjectDLL(DWORD processId, const char *dllPath) {
     CloseHandle(hProcess);
 
     return exitCode != 0;
+}
+
+// Check if a DLL is already loaded in a process
+bool IsDllLoadedInProcess(DWORD processId, const char *dllPath) {
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processId);
+    if (!hProcess) {
+        return false;
+    }
+
+    // Get the DLL filename from the full path
+    std::string dllPathStr(dllPath);
+    size_t lastSlash = dllPathStr.find_last_of("\\/");
+    std::string dllName = (lastSlash != std::string::npos) ? dllPathStr.substr(lastSlash + 1) : dllPathStr;
+
+    HMODULE modules[1024];
+    DWORD bytesNeeded;
+    bool found = false;
+
+    if (EnumProcessModules(hProcess, modules, sizeof(modules), &bytesNeeded)) {
+        DWORD moduleCount = bytesNeeded / sizeof(HMODULE);
+        for (DWORD i = 0; i < moduleCount; i++) {
+            char moduleName[MAX_PATH];
+            if (GetModuleBaseNameA(hProcess, modules[i], moduleName, sizeof(moduleName))) {
+                if (_stricmp(moduleName, dllName.c_str()) == 0) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    CloseHandle(hProcess);
+    return found;
 }

@@ -309,6 +309,22 @@ class SiphonServiceImpl final : public SiphonService::Service {
         }
 
         try {
+            // Check if memory is already initialized for the same process
+            if (memory_) {
+                DWORD currentPid = memory_->FindProcessByName(processName_);
+                if (currentPid != 0 && currentPid == processId_) {
+                    spdlog::info("Memory already initialized for process {} (PID: {}), reusing existing instance", 
+                                 processName_, processId_);
+                    response->set_success(true);
+                    response->set_message("Memory already initialized (reusing existing instance)");
+                    response->set_process_id(processId_);
+                    return Status::OK;
+                } else {
+                    spdlog::warn("Memory was initialized for different process, reinitializing...");
+                    memory_.reset();
+                }
+            }
+
             spdlog::info("Initializing memory for process: {}", processName_);
 
             // Create ProcessMemory instance
@@ -662,6 +678,10 @@ class SiphonServiceImpl final : public SiphonService::Service {
                          "latency: {:.2f}ms, Dropped: {}",
                          stats.totalFrames, stats.actualDurationSeconds, stats.actualFps,
                          stats.averageLatencyMs, stats.droppedFrames);
+            
+            // Reset recorder to allow fresh start for next recording session
+            recorder_.reset();
+            spdlog::info("Recorder instance reset for next session");
         } else {
             response->set_success(false);
             response->set_message("Failed to stop recording");

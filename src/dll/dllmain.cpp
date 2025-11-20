@@ -6,6 +6,8 @@
 #include <stdio.h>
 
 SharedMemory g_sharedMem;
+static bool g_initialized = false;
+static bool g_hookInstalled = false;
 
 typedef void *(__fastcall *GetTargetedNpcFunc)(void *param_1);
 GetTargetedNpcFunc g_originalFunc = nullptr;
@@ -24,10 +26,25 @@ void *__fastcall DetourGetTargetedNpc(void *param_1) {
 DWORD WINAPI InitThread(LPVOID param) {
     Sleep(1000);
 
+    // Check if already initialized
+    if (g_initialized) {
+        // Already initialized, just wait for/reuse shared memory
+        if (!g_sharedMem.data) {
+            if (!g_sharedMem.OpenShared()) {
+                MessageBoxA(nullptr, "Failed to open existing shared memory", "Error", MB_OK);
+                return 1;
+            }
+        }
+        return 0;
+    }
+
     // Create shared memory
     if (!g_sharedMem.CreateShared()) {
-        MessageBoxA(nullptr, "Failed to create shared memory", "Error", MB_OK);
-        return 1;
+        // If creation fails, try opening existing shared memory
+        if (!g_sharedMem.OpenShared()) {
+            MessageBoxA(nullptr, "Failed to create or open shared memory", "Error", MB_OK);
+            return 1;
+        }
     }
 
     // Wait for executable to provide the hook address
@@ -53,10 +70,16 @@ DWORD WINAPI InitThread(LPVOID param) {
     // sprintf_s(msg, "Received hook address: 0x%llX\nInstalling hook...", functionAddr);
     // MessageBoxA(nullptr, msg, "Info", MB_OK);
 
-    // Initialize MinHook
-    if (MH_Initialize() != MH_OK) {
+    // Initialize MinHook (check if already initialized)
+    MH_STATUS status = MH_Initialize();
+    if (status != MH_OK && status != MH_ERROR_ALREADY_INITIALIZED) {
         MessageBoxA(nullptr, "MinHook init failed", "Error", MB_OK);
         return 1;
+    }
+
+    // Check if hook is already installed at this address
+    if (g_hookInstalled) {
+        return 0;
     }
 
     // Create hook
@@ -74,6 +97,9 @@ DWORD WINAPI InitThread(LPVOID param) {
         return 1;
     }
 
+    g_hookInstalled = true;
+    g_initialized = true;
+
     // MessageBoxA(nullptr, "Hook installed successfully!", "Success", MB_OK);
     return 0;
 }
@@ -82,13 +108,20 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
     switch (reason) {
     case DLL_PROCESS_ATTACH:
         DisableThreadLibraryCalls(hModule);
-        CreateThread(nullptr, 0, InitThread, nullptr, 0, nullptr);
+        // Only create init thread if not already initialized
+        if (!g_initialized) {
+            CreateThread(nullptr, 0, InitThread, nullptr, 0, nullptr);
+        }
         break;
 
     case DLL_PROCESS_DETACH:
-        MH_DisableHook(MH_ALL_HOOKS);
-        MH_Uninitialize();
+        if (g_hookInstalled) {
+            MH_DisableHook(MH_ALL_HOOKS);
+            MH_Uninitialize();
+        }
         g_sharedMem.Close();
+        g_initialized = false;
+        g_hookInstalled = false;
         break;
     }
     return TRUE;
