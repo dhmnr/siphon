@@ -293,9 +293,8 @@ LRESULT CALLBACK InputEventLogger::MouseHookProc(int nCode, WPARAM wParam, LPARA
             break;
         }
         case WM_MOUSEMOVE:
-            event.eventType = "MOUSE_MOVE";
-            event.keyOrButton = "MOVE";
-            break;
+            // Skip recording mouse movement (too much noise)
+            return CallNextHookEx(NULL, nCode, wParam, lParam);
         case WM_MOUSEWHEEL:
             event.eventType = "MOUSE_WHEEL";
             event.keyOrButton = "WHEEL";
