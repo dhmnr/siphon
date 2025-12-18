@@ -26,7 +26,8 @@ std::vector<uint8_t> JpegEncoder::EncodeBGRA(const uint8_t *pixels, int width, i
     // Configure JPEG encoder
     codecCtx->width = width;
     codecCtx->height = height;
-    codecCtx->pix_fmt = AV_PIX_FMT_YUVJ420P; // JPEG uses full-range YUV
+    codecCtx->pix_fmt = AV_PIX_FMT_YUV420P;
+    codecCtx->color_range = AVCOL_RANGE_JPEG; // Full range for JPEG
     codecCtx->time_base = AVRational{1, 1};
 
     // Quality: 2-31 (lower = better), convert from 1-100 scale
@@ -57,9 +58,11 @@ std::vector<uint8_t> JpegEncoder::EncodeBGRA(const uint8_t *pixels, int width, i
         return {};
     }
 
-    // Convert BGRA to YUV420
+    yuvFrame->color_range = AVCOL_RANGE_JPEG; // Full range
+
+    // Convert BGRA to YUV420 (full range for JPEG)
     SwsContext *swsCtx = sws_getContext(width, height, AV_PIX_FMT_BGRA, width, height,
-                                        AV_PIX_FMT_YUVJ420P, SWS_BILINEAR, nullptr, nullptr,
+                                        AV_PIX_FMT_YUV420P, SWS_BILINEAR, nullptr, nullptr,
                                         nullptr);
     if (!swsCtx) {
         av_frame_free(&yuvFrame);

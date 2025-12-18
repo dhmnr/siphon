@@ -852,12 +852,17 @@ class SiphonServiceImpl final : public SiphonService::Service {
 
     Status StreamFrames(ServerContext *context, const StreamFramesRequest *request,
                         ServerWriter<FrameData> *writer) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-
-        if (!frameBroadcaster_ || !frameBroadcaster_->IsRunning()) {
-            return Status(StatusCode::FAILED_PRECONDITION,
-                          "Capture not initialized or FrameBroadcaster not running");
+        // Validate and get broadcaster pointer (release lock quickly!)
+        FrameBroadcaster* broadcaster = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!frameBroadcaster_ || !frameBroadcaster_->IsRunning()) {
+                return Status(StatusCode::FAILED_PRECONDITION,
+                              "Capture not initialized or FrameBroadcaster not running");
+            }
+            broadcaster = frameBroadcaster_.get();
         }
+        // Lock released here - other RPCs can now execute!
 
         // Parse request parameters
         std::string format = request->format().empty() ? "jpeg" : request->format();
@@ -879,7 +884,7 @@ class SiphonServiceImpl final : public SiphonService::Service {
             frameCv.notify_one();
         };
 
-        uint64_t subscriptionId = frameBroadcaster_->Subscribe(callback);
+        uint64_t subscriptionId = broadcaster->Subscribe(callback);
 
         // Stream frames until client disconnects
         int framesStreamed = 0;
@@ -927,7 +932,7 @@ class SiphonServiceImpl final : public SiphonService::Service {
         }
 
         // Unsubscribe
-        frameBroadcaster_->Unsubscribe(subscriptionId);
+        broadcaster->Unsubscribe(subscriptionId);
         spdlog::info("Frame stream ended: {} frames streamed", framesStreamed);
 
         return Status::OK;
